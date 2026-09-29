@@ -4,7 +4,7 @@
   "chip_register": "0xe1078820",
   "usb_runtime": "a69c:8d81",
   "firmware_version": "0x06090100",
-  "status": "5 GHz WPA2 Enterprise connection verified on hardware: PEAP/MSCHAPv2, pairwise/group keys, AX900 DHCP and gateway ICMP replies",
+  "status": "5 GHz PEAP/MSCHAPv2, NVS credential memory and automatic reconnection after reset, gateway test UI, and physical Tab5Keyboard input verified on hardware",
   "application": "M5Tab5-UserDemo/platforms/tab5/build/m5stack_tab5.bin",
   "application_bytes": 6424416,
   "application_sha256": "4a2fdf9f5895e36527f552e6b98416b09c4be9b0100248f4f4b06fdb69a2c08f",
@@ -19,7 +19,10 @@
     "WPA2-PSK and PEAP/MSCHAPv2 supplicant integration",
     "bounded Ethernet RX/TX queues",
     "independent esp_netif and DHCP integration",
-    "association-only diagnostic and interface-bound gateway ping"
+    "association-only diagnostic and interface-bound gateway ping",
+    "graphical five-request gateway test with PSRAM task stack",
+    "local NVS Wi-Fi profiles and boot reconnection",
+    "Tab5Keyboard I2C input and LVGL focus navigation"
   ],
   "evidence_note": "Real hardware run on 2026-09-29. Public record omits account, SSID, BSSID, device MAC and private IP addresses. Local ignored logs retain status evidence; credentials are not logged.",
   "repository_verification": {
@@ -100,21 +103,49 @@
     "hardware_rendering": "1280x720 device snapshot reviewed; disconnected state, address placeholders and disabled Run test button verified",
     "firmware_build": "official UserDemo and standalone project passed",
     "patch_verification": "13 application/CMake files match tested firmware source after applying to pinned official baseline",
-    "hardware_ping_ui": "ESP_ERR_NO_MEM reproduced in prior image; final image uses PSRAM task stack and is installed, but connected retest is pending because latest PEAP attempt failed",
-    "limits": "Gateway ICMP only; DNS is displayed, not actively resolved; no Internet or throughput test"
+    "hardware_ping_ui": {
+      "sent": 5,
+      "received": 5,
+      "average_ms": 34,
+      "min_ms": 11,
+      "max_ms": 107,
+      "elapsed_ms": 2500,
+      "error": 0
+    },
+    "limits": "Gateway ICMP only; DNS is displayed, not actively resolved; no Internet or throughput test",
+    "hardware_ping_after_reboot": {
+      "trigger": "ax900 test-run invokes the UI button callback",
+      "sent": 5,
+      "received": 5,
+      "average_ms": 38,
+      "min_ms": 13,
+      "max_ms": 122,
+      "elapsed_ms": 2500,
+      "error": 0
+    }
   },
   "keyboard": {
     "hardware": "M5Stack Tab5Keyboard, I2C address 0x6D, reported firmware 1",
     "controller": "ESP32-P4 LP I2C, SDA GPIO0 / SCL GPIO1; Port A remains HP I2C1 GPIO53/54",
     "detection": "Detected on physical Tab5",
-    "typing": "Pending user verification on final image",
+    "typing": "User confirmed entering the enterprise username/password on the physical keyboard and connecting successfully",
     "privacy": "No key content logging; LVGL log level WARN; snapshots blocked while credential dialog is open"
   },
   "wifi_memory": {
     "storage": "Device NVS namespace ax900_wifi, up to four profiles; NVS encryption disabled in official demo",
     "save_policy": "Only after authenticated DHCP; failed/diagnostic attempts do not replace working profiles",
     "reconnect_policy": "Single attempt after boot scan, most recent profile first, prefer matching 5 GHz AP, same SSID and security required",
-    "hardware_save_and_reboot": "Pending user connection on updated image",
+    "hardware_save_and_reboot": {
+      "saved_profiles": 1,
+      "initial_save_error": 0,
+      "reset": "esptool hard reset",
+      "reconnect_started_at_ms": 13701,
+      "authenticated_at_ms": 14149,
+      "dhcp_at_ms": 15771,
+      "frequency_mhz": 5260,
+      "credentials_reentered_after_reset": false,
+      "current_profile_saved": true
+    },
     "export_api": false,
     "hardware_failed_attempt": "PEAP authentication failure on the installed image left saved profile count at zero"
   }
