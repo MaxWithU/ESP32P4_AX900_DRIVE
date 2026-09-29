@@ -1,2 +1,2 @@
-# Preserve upstream whitespace in unified diff context lines.
-*.patch -whitespace
+# Keep imported Hostap source byte-for-byte (apart from the documented guard fix).
+components/ax900/supplicant/** -whitespace

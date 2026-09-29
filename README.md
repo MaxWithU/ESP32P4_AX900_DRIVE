@@ -2,14 +2,17 @@
 
 面向 ESP-IDF 的 AX900 USB Wi-Fi 驱动移植，已在 **M5Stack Tab5 / ESP32-P4** 上验证 2.4 GHz 和 5 GHz 热点扫描。
 
-**当前版本仅支持扫描。尚未实现 STA 关联、WPA 密钥协商、网络数据收发、esp_netif 或 DHCP，不能用于联网。**
+**当前版本正在验证联网功能。已接入 STA 关联、WPA2-PSK、PEAP/MSCHAPv2、以太网收发及 DHCP；编译和 TLS 主机测试通过，但企业网络实机连接尚未验证成功，暂不能作为已完成的联网驱动使用。**
 
 ## 已实现与验证
 
 - USB 模式切换：`a69c:5721` 存储模式 → `a69c:8d80` 固件加载 → `a69c:8d81` 无线运行。
 - 固件上传、补丁表加载、射频初始化、双频被动扫描和重复扫描。
+- 网卡未烧录有效 MAC 时，基于 ESP32-P4 硬件地址派生稳定的本地单播地址；不写入网卡 eFuse。连接前在选定信道定向探测目标 AP。
 - 最多缓存 64 个 BSSID，提供 SSID、频率、RSSI 和加密标志。
-- 官方 M5Tab5 UserDemo 接入补丁：右上角 **AX900 Wi-Fi**、5 GHz 优先列表、**Scan again** 和 USB 串口诊断。
+- 官方 M5Tab5 UserDemo 接入补丁：5 GHz 优先列表、密码/企业账号输入、连接/断开和 USB 串口诊断。
+- 上游 Hostap WPA2/EAP 状态机、mbedTLS PEAP TLS 1.2 桥接、USB 数据队列及独立 AX900 `esp_netif`。
+- 已实机验证 5 GHz STA 关联成功及初始 EAPOL 接收；这不等于企业账号认证或 DHCP 成功。
 - 实机最近一次验证缓存 64 个热点，其中 45 个为 5 GHz；数量随环境变化，64 为缓存上限。
 - USB 报文解析通过 ASan / UBSan 检查，包括实机报文、截断、聚合及 100,000 组异常输入。
 
@@ -52,7 +55,7 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 // 在 USB Host 和板级供电准备好后调用一次。
 ESP_ERROR_CHECK(ax900_start());
 
-// 状态结构约 3 KB，建议使用静态或堆存储。
+// 状态结构约 22 KB，建议使用静态或堆存储。
 static ax900_status_t status;
 ax900_get_status(&status);
 if (status.ready && !status.scanning) {
@@ -63,6 +66,32 @@ if (status.ready && !status.scanning) {
 
 Tab5 USB-A 供电涉及 GPIO31/32 上的 I2C 扩展器 `0x44`、P3；独立示例通过读改写保留其他引脚状态。其他 ESP32-P4 板需替换板级初始化。默认使用 CN 信道集合：2.4 GHz 1–13；5 GHz 36/40/44/48/52/56/60/64/149/153/157/161/165，采用被动扫描。
 
+## 连接接口（实验阶段）
+
+`ax900_connect(&ap, password)` 支持开放网络和 WPA2-PSK/CCMP；必须从扫描结果选择 BSSID。
+`ax900_connect_peap(&ap, &config)` 支持 WPA2 Enterprise 的 PEAP/MSCHAPv2：
+
+```c
+ax900_peap_config_t config = {
+    .username = locally_entered_username,
+    .password = locally_entered_password,
+    .ca_cert_pem = trusted_ca_pem,
+    .server_name = authentication_server_dns_name,
+    .allow_unverified_server = false,
+};
+esp_err_t result = ax900_connect_peap(&ap, &config);
+```
+
+字符串会复制到驱动 RAM，不写入 NVS 或日志，断开或失败时清除。CA 校验还要求设备有正确时间。
+若用户明确选择不校验服务器，省略 CA/域名并显式设置 `allow_unverified_server=true`；这种模式无法验证服务器身份，账号信息可能被冒充热点窃取。官方示例窗口提供有明确标记的“不校验证书”选项；使用 CA/域名的应用需通过 API 提供配置。
+
+当前限制：CCMP、TLS 1.2，不支持 WPA3、TKIP、强制 PMF、EAP-TLS、自动漫游/预认证或密码变更。扫描期间不能连接，连接期间须先断开才能扫描。
+上游认证核心尚未统一加符号前缀，当前配置关闭内置 Espressif Wi-Fi supplicant；不要同时链接另一套 Hostap 符号。
+
+`associated` 仅表示无线关联；`authenticated` 表示 WPA2 密钥安装/控制端口开放；只有 `has_ip` 才表示 AX900 获得 DHCP 地址。官方演示中另一个 Wi-Fi AP 的 `192.168.4.1` 不能作为 AX900 已联网的证据。
+`ax900 associate` 只测试无线关联，不发送用户名或密码，不开放数据端口，成功后 10 秒自动断开。
+`ax900 probe` 通过 AX900 接口向 DHCP 网关发送 3 次 ICMP 请求。
+
 ## 官方界面与诊断
 
 [官方 M5Tab5 UserDemo 接入说明](docs/official-userdemo.md) 提供固定基线提交及接入补丁。补丁包含 LVGL 界面和以下串口命令：
@@ -71,6 +100,10 @@ Tab5 USB-A 供电涉及 GPIO31/32 上的 I2C 扩展器 `0x44`、P3；独立示�
 ax900 status
 ax900 scan
 ax900 open
+ax900 select <SSID>
+ax900 associate [frequency_MHz] <SSID>
+ax900 disconnect
+ax900 probe
 ax900 snapshot
 ```
 
@@ -95,8 +128,35 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
 /tmp/ax900-frame-test
 ```
 
-长期热插拔稳定性和吞吐尚未验证；联网功能仍待实现。协议及固件兼容性说明见 [固件说明](components/ax900/firmware/README.md)。
+长期热插拔稳定性、真实认证、DHCP 与吞吐仍待验证。协议及固件兼容性说明见 [固件说明](components/ax900/firmware/README.md)。
+
+官方动画库修复的回归测试（先按接入说明应用依赖补丁）：
+
+```sh
+c++ -std=c++17 -Wall -Wextra -Wno-unused-parameter -fsanitize=address,undefined \
+  -I ../Tab5/M5Tab5-UserDemo/dependencies/smooth_ui_toolkit/src \
+  tests/spring_initialization_test.cpp \
+  ../Tab5/M5Tab5-UserDemo/dependencies/smooth_ui_toolkit/src/animation/generators/spring/spring.cpp \
+  -o /tmp/ax900-spring-test
+/tmp/ax900-spring-test
+```
+
+接收解码测试：
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+  -I components/ax900 tests/rx_test.c -o /tmp/ax900-rx-test
+/tmp/ax900-rx-test
+```
+
+TLS 桥接测试（本机需 CMake、C 编译器、OpenSSL 和 mbedTLS 3.6.x 源码；已在 macOS 上运行）：
+
+```sh
+MBEDTLS_SOURCE="$IDF_PATH/components/mbedtls/mbedtls" sh tests/run_tls_test.sh
+```
+
+测试与真实内存 TLS 服务端交换分片握手和双向应用数据，比较 EAP 密钥导出，并确认错误域名、不受信任 CA 会失败。临时证书和测试密钥仅在临时目录生成。它不替代完整 PEAP/MSCHAPv2、WPA2 或实机无线测试。
 
 ## 许可与来源
 
-主机驱动及独立示例采用 Apache-2.0，协议结构参考 `canmv-k230/rtsmart`，保留 [NOTICE](NOTICE) 和来源提交。官方 UserDemo 接入补丁遵循 MIT，见 [patches/LICENSE.MIT](patches/LICENSE.MIT)。原厂固件及配置遵循各自的供应商条款，通过下载脚本获取，不属于上述源码许可。
+Hostap 认证核心采用 BSD-3-Clause，原始许可随源码保留。主机驱动、mbedTLS 适配及独立示例采用 Apache-2.0，协议结构参考 `canmv-k230/rtsmart`，保留 [NOTICE](NOTICE) 和来源提交。官方 UserDemo 接入补丁遵循 MIT，见 [patches/LICENSE.MIT](patches/LICENSE.MIT)。原厂固件及配置遵循各自的供应商条款，通过下载脚本获取，不属于上述源码许可。

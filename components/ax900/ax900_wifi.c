@@ -5,13 +5,14 @@
 #include "ax900_internal.h"
 #include "aic8800_protocol.h"
 #include "esp_timer.h"
+#include "esp_mac.h"
 #include <stdlib.h>
 
 // CN (SRRC) channels from the matching vendor powerlimit file. Passive scans.
 static const uint8_t channels5[]={36,40,44,48,52,56,60,64,149,153,157,161,165};
-static void channel(uint8_t *out,unsigned number,bool band5) {
+static void channel(uint8_t *out,unsigned number,bool band5,bool passive) {
     put16(out,band5?5000+5*number:2407+5*number);
-    out[2]=band5;out[3]=1; // no active probe transmission
+    out[2]=band5;out[3]=passive?1:0; // Passive applies to scans, not the operating channel table.
     out[4]=band5?(number<149?15:20):(number==13?13:number==12?15:16);
 }
 static esp_err_t command(ax900_device_t *d,uint16_t req,uint16_t cfm,const void *p,size_t n) {
@@ -37,7 +38,15 @@ esp_err_t ax_runtime_init(ax900_device_t *d) {
     TRY(command(d,AIC_MM_SET_RF_CALIB_REQ,AIC_MM_SET_RF_CALIB_CFM,&rf,sizeof(rf)));
     uint32_t getmac=1;
     TRY(ax_command(d,AIC_MM_GET_MAC_REQ,AIC_MM_GET_MAC_CFM,&getmac,4,d->mac,6,&got));
-    if(got!=6 || (d->mac[0]&1))return ESP_ERR_INVALID_RESPONSE;
+    if(got!=6)return ESP_ERR_INVALID_RESPONSE;
+    if((d->mac[0]&1) || !memcmp(d->mac,"\0\0\0\0\0\0",6)) {
+        // Some adapters have no MAC in efuse. Vendor Linux also falls back.
+        // Derive a stable unicast address for this board without programming efuses.
+        uint8_t base[6];TRY(esp_read_mac(base,ESP_MAC_EFUSE_FACTORY));
+        TRY(esp_derive_local_mac(d->mac,base));d->mac[5]^=0xa9;
+        ESP_LOGW("AX900","Adapter returned an invalid MAC; using stable board-derived local address");
+    }
+    ESP_LOGI("AX900","Station MAC %02x:%02x:%02x:%02x:%02x:%02x",d->mac[0],d->mac[1],d->mac[2],d->mac[3],d->mac[4],d->mac[5]);
     TRY(command(d,AIC_MM_RESET_REQ,AIC_MM_RESET_CFM,NULL,0));
     struct aic_wire_mm_version_cfm version;
     TRY(ax_command(d,AIC_MM_VERSION_REQ,AIC_MM_VERSION_CFM,NULL,0,&version,sizeof(version),&got));
@@ -50,10 +59,10 @@ esp_err_t ax_runtime_init(ax900_device_t *d) {
     me.tx_lifetime=1000;me.ht_supported=1;me.max_bandwidth=1;
     TRY(command(d,AIC_ME_CONFIG_REQ,AIC_ME_CONFIG_CFM,&me,sizeof(me)));
     uint8_t channels[254]={0};
-    for(unsigned i=0;i<13;i++)channel(channels+6*i,i+1,false);
+    for(unsigned i=0;i<13;i++)channel(channels+6*i,i+1,false,false);
     channels[252]=13;
     if(stack_reply.supports_5ghz) {
-        for(unsigned i=0;i<sizeof(channels5);i++)channel(channels+84+6*i,channels5[i],true);
+        for(unsigned i=0;i<sizeof(channels5);i++)channel(channels+84+6*i,channels5[i],true,false);
         channels[253]=sizeof(channels5);
     }
     TRY(command(d,AIC_ME_CHAN_CONFIG_REQ,AIC_ME_CHAN_CONFIG_CFM,channels,sizeof(channels)));
@@ -74,11 +83,10 @@ esp_err_t ax_scan(ax900_device_t *d) {
         struct aic_wire_scanu_start_req scan={0};
         memset(&scan.bssid,0xff,sizeof(scan.bssid));scan.vif_index=d->vif;
         scan.channel_count=band?sizeof(channels5):13;
-        for(unsigned i=0;i<scan.channel_count;i++)channel((uint8_t *)&scan.channels[i],band?channels5[i]:i+1,band);
+        for(unsigned i=0;i<scan.channel_count;i++)channel((uint8_t *)&scan.channels[i],band?channels5[i]:i+1,band,true);
         d->scan_done=false;d->scan_result=0xff;
-        uint8_t reply[4]={0};size_t got;
-        TRY(ax_command(d,AIC_SCANU_START_REQ,AIC_SCANU_START_ACCEPTED,&scan,sizeof(scan),reply,sizeof(reply),&got));
-        if(got && reply[0])return ESP_ERR_INVALID_RESPONSE;
+        // Acceptance is only an acknowledgement; status arrives in SCANU_START_CFM.
+        TRY(ax_command(d,AIC_SCANU_START_REQ,AIC_SCANU_START_ACCEPTED,&scan,sizeof(scan),NULL,0,NULL));
         int64_t until=esp_timer_get_time()+20000000;
         while(!d->scan_done && !d->gone && esp_timer_get_time()<until)ax_pump(20);
         if(!d->scan_done) {

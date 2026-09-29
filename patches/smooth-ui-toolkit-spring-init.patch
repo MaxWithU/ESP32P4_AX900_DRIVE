@@ -1,0 +1,7 @@
+--- a/src/animation/generators/spring/spring.h
++++ b/src/animation/generators/spring/spring.h
+@@ -61,3 +61,3 @@
+     float _undamped_angular_freq;                // 未阻尼角频率
+-    float _current_velocity;                     // 当前速度
++    float _current_velocity = 0.0f;              // 当前速度
+     std::function<float(float)> _resolve_spring; // 动画计算公式

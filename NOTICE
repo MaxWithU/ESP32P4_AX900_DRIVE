@@ -10,7 +10,20 @@ Protocol declarations and implementation references are adapted from:
 
 The optional M5Tab5-UserDemo integration patch is licensed under MIT.
 See patches/LICENSE.MIT for the original M5Stack copyright and license.
+The companion animation-initialization patch targets Forairaaaaa/smooth_ui_toolkit
+v2.0.0, Copyright (c) 2023 Forairaaaaa, also under MIT.
 
 Downloaded AIC8800 firmware and vendor configuration are separate works,
 not covered by the host driver's Apache-2.0 license. Their pinned origin
 and hashes are recorded in components/ax900/firmware/SOURCE.json.
+
+WPA2 and EAP state machines in components/ax900/supplicant are a subset of
+wpa_supplicant 2.11, Copyright (c) 2003-2024 Jouni Malinen and contributors,
+under BSD-3-Clause. See that directory's COPYING, README.upstream and SOURCE.json.
+The MD4 and DES source files also retain their original embedded notices.
+
+The PEAP TLS bridge is adapted from ESP-IDF v5.5.2:
+  components/wpa_supplicant/esp_supplicant/src/crypto/tls_mbedtls.c
+  https://github.com/espressif/esp-idf/tree/v5.5.2
+  Copyright (c) 2020-2025 Espressif Systems (Shanghai) CO LTD
+  Apache-2.0. The bridge supports PEAP over TLS 1.2 using public mbedTLS APIs.

@@ -15,6 +15,11 @@ typedef struct {
     uint16_t frequency;
     int8_t rssi;
     bool secured;
+    uint8_t ssid_len;
+    uint8_t raw_ssid[32];
+    uint16_t rsn_len;
+    uint8_t rsn[258];
+    bool wpa2_psk, enterprise, sae, pmf_required;
 } ax900_ap_t;
 typedef struct {
     char status[96];
@@ -22,9 +27,31 @@ typedef struct {
     uint32_t scan_generation;
     size_t ap_count;
     ax900_ap_t aps[AX900_MAX_APS];
+    bool connecting, associated, authenticated, has_ip;
+    char connected_ssid[33];
+    char ip[16];
+    uint32_t tx_packets, rx_packets, rx_dropped;
+    uint16_t disconnect_reason;
 } ax900_status_t;
 void ax900_get_status(ax900_status_t *out);
 esp_err_t ax900_request_scan(void);
+// Queue connection to a scanned BSSID. Password is copied, never logged or persisted.
+// Supports open and WPA2-PSK/CCMP networks without mandatory PMF.
+esp_err_t ax900_connect(const ax900_ap_t *ap, const char *password);
+// All strings are copied. Trust validation requires a PEM CA and exact DNS name.
+// Explicit opt-out allows unverified servers; never enable it silently.
+typedef struct {
+    const char *username;       // 1..128 UTF-8 bytes, optionally DOMAIN\\user
+    const char *password;       // 1..128 UTF-8 bytes
+    const char *ca_cert_pem;    // optional, at most 8192 bytes
+    const char *server_name;    // required with CA, at most 253 bytes
+    bool allow_unverified_server;
+} ax900_peap_config_t;
+esp_err_t ax900_connect_peap(const ax900_ap_t *ap, const ax900_peap_config_t *config);
+// Diagnostic association only: never sends credentials or opens the data port.
+// Automatically disconnects after 10 seconds.
+esp_err_t ax900_test_association(const ax900_ap_t *ap);
+esp_err_t ax900_disconnect(void);
 #ifdef __cplusplus
 }
 #endif

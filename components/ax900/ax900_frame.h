@@ -4,8 +4,9 @@
 #include <stddef.h>
 #include <stdbool.h>
 typedef void (*ax_frame_message_fn)(void *,uint16_t,const uint8_t *,size_t);
+typedef void (*ax_frame_data_fn)(void *,const uint8_t *,size_t);
 // AIC USB records may aggregate multiple messages/data records with 4-byte padding.
-static inline bool ax_walk_messages(const uint8_t *p,size_t left,ax_frame_message_fn fn,void *arg) {
+static inline bool ax_walk_records(const uint8_t *p,size_t left,ax_frame_message_fn fn,ax_frame_data_fn data,void *arg) {
     if(!p || !fn)return false;
     while(left>=4) {
         size_t len=(p[0]|(size_t)p[1]<<8)&0xfff;
@@ -22,10 +23,15 @@ static inline bool ax_walk_messages(const uint8_t *p,size_t left,ax_frame_messag
             size_t n=p[10]|(size_t)p[11]<<8;
             if(n>raw-16)return false;
             fn(arg,id,p+16,n);
+        } else if (!(type & 0x10) && data) {
+            data(arg,p,raw);
         }
         size_t step=(raw+3)&~(size_t)3;
         if(step>left)step=raw;
         p+=step;left-=step;
     }
     return left==0;
+}
+static inline bool ax_walk_messages(const uint8_t *p,size_t left,ax_frame_message_fn fn,void *arg) {
+    return ax_walk_records(p,left,fn,NULL,arg);
 }
