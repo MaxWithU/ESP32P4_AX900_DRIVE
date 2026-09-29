@@ -533,11 +533,13 @@ diff --git a/platforms/tab5/main/ax900_console.cpp b/platforms/tab5/main/ax900_c
 new file mode 100644
 --- /dev/null
 +++ b/platforms/tab5/main/ax900_console.cpp
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,102 @@
 +// SPDX-License-Identifier: MIT
 +// Local USB diagnostic commands for repeatable hardware and display verification.
 +#include <ax900.h>
 +#include <ax900_probe.h>
++#include <ax900_diagnostics.h>
++#include <esp_heap_caps.h>
 +#include <hal/hal.h>
 +#include <lvgl.h>
 +#include <unistd.h>
@@ -610,6 +612,11 @@ new file mode 100644
 +            else if(!strcmp(command,"ax900 test-status"))probe_status();
 +            else if(!strcmp(command,"ax900 keyboard")){LvglLockGuard lock;printf("TAB5_KEYBOARD connected=%u\n",tab5_keyboard_connected());}
 +            else if(!strcmp(command,"ax900 disconnect"))printf("AX900_DISCONNECT %d\n",ax900_disconnect());
++#if CONFIG_AX900_FAULT_INJECTION
++            else if(!strcmp(command,"ax900 fault-rx"))printf("AX900_FAULT %d\n",ax900_debug_fault(AX900_FAULT_RX));
++            else if(!strcmp(command,"ax900 fault-link"))printf("AX900_FAULT %d\n",ax900_debug_fault(AX900_FAULT_LINK));
++            else if(!strcmp(command,"ax900 fault-dhcp"))printf("AX900_FAULT %d\n",ax900_debug_fault(AX900_FAULT_DHCP));
++#endif
 +            else if(!strcmp(command,"ax900 snapshot"))snapshot();
 +            else if(!strcmp(command,"ax900 status")) {
 +                auto s=std::make_unique<ax900_status_t>();ax900_get_status(s.get());
@@ -621,6 +628,10 @@ new file mode 100644
 +                    static_cast<unsigned long>(s->tx_packets),static_cast<unsigned long>(s->rx_packets),
 +                    static_cast<unsigned long>(s->rx_dropped),s->disconnect_reason);
 +                printf("AX900_SAVED count=%u current=%u error=%d\n",s->saved_networks,s->credentials_saved,s->profile_error);
++                printf("AX900_RECOVERY enabled=%u pending=%u attempts=%u in_ms=%lu usb_errors=%lu usb_recoveries=%lu error=%d heap=%u internal=%u\n",
++                    s->reconnect_enabled,s->reconnect_pending,s->reconnect_attempts,(unsigned long)s->reconnect_in_ms,
++                    (unsigned long)s->usb_errors,(unsigned long)s->usb_recoveries,s->transport_error,
++                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),(unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT));
 +            }
 +        } else if(used<sizeof(command)-1)command[used++]=input[i];
 +    }

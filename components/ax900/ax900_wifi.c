@@ -20,10 +20,14 @@ static esp_err_t command(ax900_device_t *d,uint16_t req,uint16_t cfm,const void 
 }
 esp_err_t ax_runtime_init(ax900_device_t *d) {
     struct aic_wire_mm_set_stack_start_req stack={.start=1,.vendor_info=0x20};
-    struct aic_wire_mm_set_stack_start_cfm stack_reply;size_t got=0;
+    struct aic_wire_mm_set_stack_start_cfm stack_reply={.supports_5ghz=d->supports_5ghz};size_t got=0;
+    if(!d->radio_started) {
     TRY(ax_command(d,AIC_MM_SET_STACK_START_REQ,AIC_MM_SET_STACK_START_CFM,&stack,sizeof(stack),&stack_reply,sizeof(stack_reply),&got));
     if(got!=sizeof(stack_reply))return ESP_ERR_INVALID_RESPONSE;
     ESP_LOGI("AX900","STACK_STARTED supports_5ghz=%u vendor=%02x",stack_reply.supports_5ghz,stack_reply.vendor_info);
+    d->radio_started=true;d->supports_5ghz=stack_reply.supports_5ghz!=0;
+    }
+    if(!d->radio_configured) {
     // Exact values from usb/aic8800D80/aic_userconfig_8800d80.txt.
     struct aic_wire_mm_set_tx_power_req power={.configuration.v3={
         .enable=1,
@@ -47,6 +51,8 @@ esp_err_t ax_runtime_init(ax900_device_t *d) {
         ESP_LOGW("AX900","Adapter returned an invalid MAC; using stable board-derived local address");
     }
     ESP_LOGI("AX900","Station MAC %02x:%02x:%02x:%02x:%02x:%02x",d->mac[0],d->mac[1],d->mac[2],d->mac[3],d->mac[4],d->mac[5]);
+    d->radio_configured=true;
+    }
     TRY(command(d,AIC_MM_RESET_REQ,AIC_MM_RESET_CFM,NULL,0));
     struct aic_wire_mm_version_cfm version;
     TRY(ax_command(d,AIC_MM_VERSION_REQ,AIC_MM_VERSION_CFM,NULL,0,&version,sizeof(version),&got));
@@ -73,8 +79,8 @@ esp_err_t ax_runtime_init(ax900_device_t *d) {
     uint8_t add[10]={0},reply[2];memcpy(add+2,d->mac,6);
     TRY(ax_command(d,AIC_MM_ADD_IF_REQ,AIC_MM_ADD_IF_CFM,add,sizeof(add),reply,2,&got));
     if(got!=2 || reply[0])return ESP_ERR_INVALID_RESPONSE;
-    d->vif=reply[1];ax_set_ready(stack_reply.supports_5ghz!=0);
-    ax_status("AX900 radio ready");return ESP_OK;
+    d->vif=reply[1];d->supports_5ghz=stack_reply.supports_5ghz!=0;
+    return ESP_OK;
 }
 esp_err_t ax_scan(ax900_device_t *d) {
     ax900_status_t *status=malloc(sizeof(*status));if(!status)return ESP_ERR_NO_MEM;
@@ -88,7 +94,7 @@ esp_err_t ax_scan(ax900_device_t *d) {
         // Acceptance is only an acknowledgement; status arrives in SCANU_START_CFM.
         TRY(ax_command(d,AIC_SCANU_START_REQ,AIC_SCANU_START_ACCEPTED,&scan,sizeof(scan),NULL,0,NULL));
         int64_t until=esp_timer_get_time()+20000000;
-        while(!d->scan_done && !d->gone && esp_timer_get_time()<until)ax_pump(20);
+        while(!d->scan_done && !d->gone && !d->fault && esp_timer_get_time()<until)ax_pump(20);
         if(!d->scan_done) {
             command(d,AIC_SCANU_CANCEL_REQ,AIC_SCANU_CANCEL_CFM,NULL,0);
             return ESP_ERR_TIMEOUT;

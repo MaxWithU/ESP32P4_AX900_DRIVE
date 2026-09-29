@@ -37,6 +37,10 @@ typedef struct {
     uint8_t saved_networks;
     bool credentials_saved;
     esp_err_t profile_error;
+    bool reconnect_enabled, reconnect_pending;
+    uint8_t reconnect_attempts;
+    uint32_t reconnect_in_ms, usb_errors, usb_recoveries;
+    esp_err_t transport_error;
 } ax900_status_t;
 void ax900_get_status(ax900_status_t *out);
 // True only while this connection still has an authenticated AX900 DHCP lease.
@@ -63,6 +67,7 @@ esp_err_t ax900_forget_saved(void);
 // Diagnostic association only: never sends credentials or opens the data port.
 // Automatically disconnects after 10 seconds.
 esp_err_t ax900_test_association(const ax900_ap_t *ap);
+// Cancels automatic recovery too, including while the USB adapter is absent.
 esp_err_t ax900_disconnect(void);
 #ifdef __cplusplus
 }

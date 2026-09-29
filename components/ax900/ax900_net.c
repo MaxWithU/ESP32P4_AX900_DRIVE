@@ -32,11 +32,12 @@ static struct {
     enum wpa_states wpa_state;
     ax900_ap_t ap;
     uint8_t keys[5];
-    atomic_bool authenticated, has_ip;
+    atomic_bool authenticated, has_ip, ip_lost;
     atomic_uint generation;
     bool authorize, failed, recycled, save_attempted;
     uint16_t reason;
     int64_t deadline, dhcp_deadline;
+    unsigned dhcp_retries;
 } net;
 
 void ax_parse_security(ax900_ap_t *ap) {
@@ -60,7 +61,7 @@ static void free_rx(void *handle,void *buffer) {free(buffer);}
 static void ip_event(void *arg,esp_event_base_t base,int32_t id,void *data) {
     ip_event_got_ip_t *event=data;
     if(!event || event->esp_netif!=net.netif)return;
-    if(id==IP_EVENT_ETH_LOST_IP){net.has_ip=false;ax_ip_state(NULL);if(net.authenticated)ax_status("IP address lost; waiting for DHCP");return;}
+    if(id==IP_EVENT_ETH_LOST_IP){net.has_ip=false;ax_ip_state(NULL);if(net.authenticated)net.ip_lost=true;return;}
     if(id==IP_EVENT_ETH_GOT_IP && net.authenticated) {
         net.has_ip=true;
         char ip[16];snprintf(ip,sizeof(ip),IPSTR,IP2STR(&event->ip_info.ip));ax_ip_state(ip);
@@ -95,7 +96,7 @@ esp_err_t ax_net_init(ax900_device_t *d) {
 }
 static void drain(QueueHandle_t q) {struct packet *p;while(q && xQueueReceive(q,&p,0)==pdTRUE)free(p);}
 static void clear_link(void) {
-    net.save_attempted=false;
+    net.save_attempted=false;net.ip_lost=false;net.dhcp_retries=0;net.failed=false;
     net.authenticated=false;net.has_ip=false;net.dhcp_deadline=0;atomic_fetch_add(&net.generation,1);net.authorize=false;net.deadline=0;
     if(net.netif)esp_netif_action_disconnected(net.netif,NULL,0,NULL);
     if(net.sm){wpa_sm_deinit(net.sm);net.sm=NULL;}
@@ -105,7 +106,7 @@ static void clear_link(void) {
     net.wpa_state=WPA_DISCONNECTED;
     drain(net.rx);drain(net.tx);
     ax_link_state(false,false,false,NULL,net.reason);
-    if(net.d){net.d->associated=false;net.d->station=0xff;}
+    if(net.d){net.d->associated=false;net.d->station=0xff;net.d->link_event=false;net.d->disconnected=false;}
 }
 void ax_net_stop(ax900_device_t *d) {
     if(net.d!=d)return;
@@ -225,7 +226,7 @@ static esp_err_t confirm_target(ax900_device_t *d,const ax900_ap_t *ap) {
     // Acceptance payload is not a status byte; use the final scan confirmation.
     TRY(ax_command(d,AIC_SCANU_START_REQ,AIC_SCANU_START_ACCEPTED,&scan,sizeof(scan),NULL,0,NULL));
     int64_t until=esp_timer_get_time()+3000000;
-    while(!d->scan_done && !d->gone && esp_timer_get_time()<until)ax_pump(10);
+    while(!d->scan_done && !d->gone && !d->fault && esp_timer_get_time()<until)ax_pump(10);
     if(!d->scan_done)return ESP_ERR_TIMEOUT;
     if(d->scan_result)return ESP_FAIL;
     for(unsigned i=0;i<5;i++)ax_pump(10);
@@ -310,11 +311,20 @@ void ax_net_receive(void *arg,const uint8_t *record,size_t length) {
     if(!ax_decode_rx(record,length,d->vif,d->bssid,enqueue_rx,NULL))ax_packet_count(false,true);
 }
 void ax_net_poll(ax900_device_t *d) {
-    if(d!=net.d)return;
-    if(d->disconnected){d->disconnected=false;net.reason=d->disconnect_reason;clear_link();ax_status("Access point disconnected");}
+    if(d!=net.d || d->fault || d->gone || d->stopping)return;
+    if(d->disconnected){
+        bool session=net.credentials!=NULL;
+        bool diagnostic=session && net.credentials->association_test;
+        net.reason=d->disconnect_reason;
+        // A rejection during authentication can indicate stale credentials.
+        bool auth_failure=session && (!net.authenticated || (net.reason>=14 && net.reason<=24));
+        clear_link();ax_status("Access point disconnected");
+        if(session && !diagnostic)ax_reconnect_lost(auth_failure);
+        return;
+    }
     if(d->link_event) {
         d->link_event=false;
-        if(d->link_status || !d->associated){net.reason=d->link_status;clear_link();ax_status("Association failed (IEEE status in reason)");}
+        if(d->link_status || !d->associated){net.reason=d->link_status;clear_link();ax_status("Association failed (IEEE status in reason)");ax_reconnect_lost(false);return;}
         else {
             net.recycled=true; // Recycle only after a real association has created peer state.
             ax_link_state(true,true,false,net.ap.ssid,0);
@@ -327,7 +337,7 @@ void ax_net_poll(ax900_device_t *d) {
         }
     }
     struct packet *p;
-    for(unsigned budget=0;budget<24 && xQueueReceive(net.rx,&p,0)==pdTRUE;budget++) {
+    for(unsigned budget=0;budget<24 && !d->fault && !d->gone && xQueueReceive(net.rx,&p,0)==pdTRUE;budget++) {
         ax_packet_count(false,false);
         bool eapol=p->len>=14 && p->bytes[12]==0x88 && p->bytes[13]==0x8e;
         if(eapol && net.sm && !memcmp(p->bytes+6,d->bssid,6)) {
@@ -342,30 +352,51 @@ void ax_net_poll(ax900_device_t *d) {
         }
         free(p);
     }
+    if(d->fault || d->gone)return;
     ax_supplicant_poll();
+    if(d->fault || d->gone)return;
     if(net.eapol && eapol_sm_failed(net.eapol)){net.failed=true;net.reason=23;}
     if(net.failed || (net.deadline && esp_timer_get_time()>net.deadline)) {
         bool diagnostic=net.credentials && net.credentials->association_test;
         bool timeout=!net.failed;ax_net_disconnect(d,net.reason?net.reason:15);net.failed=false;
-        ax_status(diagnostic?"Association test ended":timeout?"Connection timed out":"WPA2 authentication failed");return;
+        ax_status(diagnostic?"Association test ended":timeout?"Connection timed out":"WPA2 authentication failed");
+        if(!diagnostic)ax_reconnect_lost(true);
+        return;
     }
     if(net.authorize && d->associated) {
         net.authorize=false;uint8_t req[2]={d->station,1};
         if(ax_command(d,AIC_ME_CONTROL_PORT_REQ,AIC_ME_CONTROL_PORT_CFM,req,sizeof(req),NULL,0,NULL)==ESP_OK) {
-            net.authenticated=true;net.deadline=0;net.dhcp_deadline=esp_timer_get_time()+30000000;ax_link_state(false,true,true,net.ap.ssid,0);
+            net.authenticated=true;net.deadline=0;net.dhcp_retries=0;net.dhcp_deadline=esp_timer_get_time()+30000000;ax_link_state(false,true,true,net.ap.ssid,0);
             ax_status("Authenticated; requesting DHCP address");esp_netif_action_connected(net.netif,NULL,0,NULL);
         } else {net.failed=true;net.reason=1;}
     }
+    if(d->fault || d->gone)return;
+    if(atomic_exchange(&net.ip_lost,false) && net.authenticated && !net.has_ip){
+        net.dhcp_deadline=esp_timer_get_time()+30000000;net.dhcp_retries=0;
+        ax_status("IP address lost; waiting for DHCP");
+    }
     if(net.authenticated && !net.has_ip && net.dhcp_deadline && esp_timer_get_time()>net.dhcp_deadline){
-        net.dhcp_deadline=0;ax_status("Authenticated; DHCP has not supplied an address");
+        if(net.dhcp_retries++<2){
+            net.dhcp_deadline=esp_timer_get_time()+30000000;
+            (void)esp_netif_dhcpc_stop(net.netif);(void)esp_netif_dhcpc_start(net.netif);
+            ax_status("DHCP timeout; retrying address request");
+        } else {
+            ax_net_disconnect(d,3);ax_status("DHCP retry limit reached");ax_reconnect_lost(false);return;
+        }
     }
     if(net.authenticated && net.has_ip && net.credentials && !net.credentials->skip_save && !net.save_attempted) {
         net.save_attempted=true;
         esp_err_t e=ax_profile_save(net.credentials);ax_profile_status(e==ESP_OK,e);
         ESP_LOGI("AX900","Wi-Fi profile save: %s",esp_err_to_name(e));
     }
-    for(unsigned budget=0;budget<8 && xQueueReceive(net.tx,&p,0)==pdTRUE;budget++) {
+    for(unsigned budget=0;budget<8 && !d->fault && !d->gone && xQueueReceive(net.tx,&p,0)==pdTRUE;budget++) {
         if(net.authenticated && p->generation==atomic_load(&net.generation))(void)ax_data_tx(d,p->bytes,p->len);free(p);
     }
 }
 void ax_net_disable_save(void){net.save_attempted=true;}
+#if CONFIG_AX900_FAULT_INJECTION
+void ax_net_debug_dhcp_timeout(void) {
+    // Exercise the terminal DHCP timeout path without modifying router settings.
+    net.has_ip=false;ax_ip_state(NULL);net.dhcp_retries=2;net.dhcp_deadline=esp_timer_get_time()-1;
+}
+#endif

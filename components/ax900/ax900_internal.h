@@ -10,6 +10,10 @@ typedef struct ax900_device {
     usb_transfer_t *rx;
     uint8_t in_ep, out_ep, data_ep, interface, vif;
     bool rx_pending, gone, stopping, reply_done, scan_done;
+    bool fault, supports_5ghz, drain_reported, interface_released, radio_started, radio_configured, endpoint_stalled;
+    uint8_t address;
+    int64_t drain_started;
+    struct ax_usb_wait *tx;
     uint8_t scan_result;
     esp_err_t reply_error;
     uint16_t waiting_id;
@@ -51,4 +55,7 @@ void ax_ip_state(const char *ip);
 void ax_packet_count(bool tx, bool dropped);
 void ax_profile_status(bool saved, esp_err_t error);
 void ax_net_disable_save(void);
+void ax_net_debug_dhcp_timeout(void);
+// Called only by the USB/network worker, never from a supplicant callback.
+void ax_reconnect_lost(bool authentication_failure);
 void ax_supplicant_poll(void);

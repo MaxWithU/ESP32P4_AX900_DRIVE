@@ -4,10 +4,10 @@
   "chip_register": "0xe1078820",
   "usb_runtime": "a69c:8d81",
   "firmware_version": "0x06090100",
-  "status": "5 GHz PEAP/MSCHAPv2, NVS credential memory and automatic reconnection after reset, gateway test UI, and physical Tab5Keyboard input verified on hardware",
+  "status": "5 GHz PEAP/MSCHAPv2, credential memory, Tab5Keyboard, gateway UI and nine controlled runtime recovery cycles verified; final firmware installed with fault injection disabled and saved-profile reconnection plus 5/5 gateway replies verified",
   "application": "M5Tab5-UserDemo/platforms/tab5/build/m5stack_tab5.bin",
-  "application_bytes": 6424416,
-  "application_sha256": "4a2fdf9f5895e36527f552e6b98416b09c4be9b0100248f4f4b06fdb69a2c08f",
+  "application_bytes": 6429776,
+  "application_sha256": "2834f2990f99362220d944660bf71199e5f6a611bda9860ba4fc66aecd71d191",
   "parser_test": "ASan + UBSan: captured reply, truncation, aggregation, reserved bits, 100000 malformed input cases passed",
   "implemented": [
     "MSC eject",
@@ -22,7 +22,10 @@
     "association-only diagnostic and interface-bound gateway ping",
     "graphical five-request gateway test with PSRAM task stack",
     "local NVS Wi-Fi profiles and boot reconnection",
-    "Tab5Keyboard I2C input and LVGL focus navigation"
+    "Tab5Keyboard I2C input and LVGL focus navigation",
+    "bounded USB fault recovery with deferred transfer cleanup",
+    "saved-network runtime reconnection with backoff and manual/authentication suppression",
+    "bounded DHCP restart and recovery"
   ],
   "evidence_note": "Real hardware run on 2026-09-29. Public record omits account, SSID, BSSID, device MAC and private IP addresses. Local ignored logs retain status evidence; credentials are not logged.",
   "repository_verification": {
@@ -31,17 +34,19 @@
     "esp_idf": "5.5.2",
     "firmware": "All five files downloaded from pinned upstream commit and verified by size and SHA-256",
     "build_command": "idf.py build (standalone and official integration)",
-    "standalone_application_bytes": 1036800,
-    "standalone_application_sha256": "329e95b7281e054b570e0372da3573a6db503901a8219bb8e2ef760d7ce5f717",
+    "standalone_application_bytes": 1041168,
+    "standalone_application_sha256": "5cfbd4c6be023510cec8e5c6389b6272b6a08304614d0576cada9bd34c3c526e",
     "official_patch": "Both patches apply to official baseline b4e356bc491ca070d54004718dad789c07d5fc93 and smooth_ui_toolkit v2.0.0; all application source files and patched dependency match tested sources",
     "parser_test": "ASan and UBSan: captured reply, truncation, aggregation, reserved length bits and 100000 malformed inputs passed",
-    "device_flash": "Official application partition updated and verified with esptool"
+    "device_flash": "Final official application partition updated and hash verified with esptool; NVS preserved; fault injection disabled"
   },
   "not_yet_verified": [
     "WPA2-Personal and open-network hardware connection",
     "CA-validated PEAP on real hardware (host TLS trust tests passed)",
     "Internet DNS/HTTP connectivity",
-    "long-term hotplug stability, reauthentication and throughput"
+    "long-term hotplug stability, reauthentication and throughput",
+    "Physical USB unplug/replug and device-side endpoint STALL on hardware (ownership/replug/STALL paths covered by host tests)",
+    "Actual AP power loss and DHCP-server outage (controlled fault paths verified)"
   ],
   "host_tests": {
     "frame": "ASan/UBSan: captured frames, truncation, aggregation and 100000 malformed inputs passed",
@@ -50,7 +55,9 @@
     "official_animation": "ASan/UBSan: dirty-storage retarget test passes with initialized velocity; original v2.0.0 fails assertion",
     "probe": "ASan/UBSan: production API tested with simulated ping callbacks; interface binding, busy gate, partial/full loss, zero RTT, stale connection results and failed-session cleanup passed",
     "wifi_profiles": "ASan/UBSan: restore/update, four slots, security matching, CA policy, flash-write failure preservation, corrupt record rejection and forget passed",
-    "keyboard": "ASan/UBSan: production key map and adapter; Aa/Sym, control suppression, malformed events, overlapping/held keys, unplug/reconnect and focus queue clearing passed"
+    "keyboard": "ASan/UBSan: production key map and adapter; Aa/Sym, control suppression, malformed events, overlapping/held keys, unplug/reconnect and focus queue clearing passed",
+    "recovery": "ASan/UBSan: production USB worker with ownership-enforcing host, stalled/canceled RX, submission and reply timeout, late callbacks, unplug/reattach, init cleanup, bounded retry, selected-network filtering, user cancellation, auth pause and forget passed",
+    "radio_recovery": "ASan/UBSan: production radio initialization resumes partial cold initialization and skips cold-only stack/RF setup during repeated runtime resets"
   },
   "hardware_association": {
     "frequency_mhz": 5260,
@@ -134,7 +141,7 @@
   "wifi_memory": {
     "storage": "Device NVS namespace ax900_wifi, up to four profiles; NVS encryption disabled in official demo",
     "save_policy": "Only after authenticated DHCP; failed/diagnostic attempts do not replace working profiles",
-    "reconnect_policy": "Single attempt after boot scan, most recent profile first, prefer matching 5 GHz AP, same SSID and security required",
+    "reconnect_policy": "Most recent matching saved network on boot; runtime recovery stays on the selected raw SSID/security. Up to five attempts with backoff; 60 seconds continuously connected resets budget. Manual disconnect, forget and authentication failures suppress recovery until explicit selection or reboot.",
     "hardware_save_and_reboot": {
       "saved_profiles": 1,
       "initial_save_error": 0,
@@ -148,5 +155,44 @@
     },
     "export_api": false,
     "hardware_failed_attempt": "PEAP authentication failure on the installed image left saved profile count at zero"
+  },
+  "recovery_validation": {
+    "diagnostic_image": {
+      "sha256": "e74cb1be2cea88c52e02f71565a83ffe2823e072148307eb234bbdc50c37c223",
+      "bytes": 6430224,
+      "fault_injection": true
+    },
+    "injected_recovery_cycles": 9,
+    "cycles_per_fault": {
+      "usb_rx_cancellation": 3,
+      "controlled_link_drop": 3,
+      "terminal_dhcp_timeout": 3
+    },
+    "all_cycles_reacquired_dhcp": true,
+    "gateway_requests": 45,
+    "gateway_replies": 43,
+    "usb_recovery_seconds": [
+      8.18,
+      8.27
+    ],
+    "manual_disconnect_stayed_offline_seconds": 25,
+    "internal_heap_note": "After the first recovery, sampled free internal heap stayed within 48 bytes across the remaining cycles; short run only, not a long-duration leak guarantee.",
+    "logs": "Raw serial/build/flash logs and per-cycle measurements remain local in ignored logs directories; no log upload.",
+    "limits": "Controlled diagnostic faults; no physical unplug/replug, real AP outage, real DHCP-server outage, device-side STALL or throughput claim. The final release image disables fault injection.",
+    "release_image_verification": {
+      "saved_profile_auto_connected": true,
+      "gateway_ping": {
+        "state": 2,
+        "sent": 5,
+        "received": 5,
+        "avg_ms": 14,
+        "min_ms": 5,
+        "max_ms": 23,
+        "elapsed_ms": 2500,
+        "error": 0
+      },
+      "reconnect_enabled": 1,
+      "fault_injection": false
+    }
   }
 }

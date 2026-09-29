@@ -2,7 +2,7 @@
 
 面向 ESP-IDF 的 AX900 USB Wi-Fi 驱动移植，已在 **M5Stack Tab5 / ESP32-P4** 上验证双频扫描和 5 GHz 企业网络连接。
 
-**实机已通过 5 GHz PEAP/MSCHAPv2 认证、WPA2 密钥协商、AX900 DHCP 获取及网关 ICMP 通信验证，实体键盘输入、Wi-Fi 配置记忆和重启自动重连也已实机通过。驱动仍处于实验阶段，互联网访问、长期稳定性和吞吐尚未验证。**
+**实机已通过 5 GHz PEAP/MSCHAPv2 认证、WPA2 密钥协商、AX900 DHCP 获取及网关 ICMP 通信验证，实体键盘输入、Wi-Fi 配置记忆和重启自动重连也已实机通过。三轮共 9 次受控故障恢复均重新获得 DHCP，恢复后网关 Ping 为 43/45；USB 恢复约 8 秒，手动断开保持离线通过。驱动仍处于实验阶段，互联网访问、长期稳定性和吞吐尚未验证。**
 
 ## 已实现与验证
 
@@ -12,7 +12,7 @@
 - 最多缓存 64 个 BSSID，提供 SSID、频率、RSSI 和加密标志。
 - 官方 M5Tab5 UserDemo 接入补丁：5 GHz 优先列表、密码/企业账号输入、连接/断开和 USB 串口诊断。
 - Tab5Keyboard 实体键盘：I²C 0x6D、Aa / Sym、字母数字符号、退格、Tab 焦点切换、方向键和 Enter 操作。
-- 成功联网后记忆最多 4 个网络，启动自动重连；提供使用已存账号连接及清除记录按钮。
+- 成功联网后记忆最多 4 个网络，启动和意外掉线自动重连；提供使用已存账号连接及清除记录按钮。
 - **Connection test** 面板：USB / 关联 / 认证 / DHCP 状态、IP / 网关 / 子网掩码 / DNS、收发计数及 5 次网关 Ping 的逐次延迟、平均延迟和丢包率。
 - 上游 Hostap WPA2/EAP 状态机、mbedTLS PEAP TLS 1.2 桥接、USB 数据队列及独立 AX900 `esp_netif`。
 - 在 5260 MHz（信道 52）完成 PEAP/MSCHAPv2 认证、单播/组播密钥安装及独立 AX900 接口 DHCP 获取；通过绑定该接口的 ICMP 请求收到网关回复。
@@ -85,7 +85,7 @@ ax900_peap_config_t config = {
 esp_err_t result = ax900_connect_peap(&ap, &config);
 ```
 
-字符串会复制到驱动 RAM；认证并获得 DHCP 地址后，在设备 `ax900_wifi` NVS 命名空间保存最多 4 个网络的账号、密码和证书策略。失败尝试不会覆盖已保存配置，诊断关联不保存；断开后清除 RAM 中的连接请求。启动扫描后优先重连最近成功的网络，同名网络优先选 5 GHz。手动断开后保持断开，自动连接失败不会循环重试。CA 校验还要求设备有正确时间。
+字符串会复制到驱动 RAM；认证并获得 DHCP 地址后，在设备 `ax900_wifi` NVS 命名空间保存最多 4 个网络的账号、密码和证书策略。失败尝试不会覆盖已保存配置，诊断关联不保存；断开后清除 RAM 中的连接请求。启动扫描后优先重连最近成功的网络，同名网络优先选 5 GHz。手动断开后保持断开；临时故障有限退避重试，认证失败暂停自动尝试。CA 校验还要求设备有正确时间。
 
 `ax900_connect_saved(&ap)` 使用已保存配置连接，`ax900_has_saved(&ap)` 只返回是否已保存，`ax900_forget_saved()` 清除 AX900 保存记录。没有导出密码的接口。官方 NVS 默认未启用 Flash/NVS 加密，因此记录是设备本地持久存储，并非加密保险库；日志、快照和 Git 均不记录凭据。
 若用户明确选择不校验服务器，省略 CA/域名并显式设置 `allow_unverified_server=true`；这种模式无法验证服务器身份，账号信息可能被冒充热点窃取。官方示例窗口提供有明确标记的“不校验证书”选项；使用 CA/域名的应用需通过 API 提供配置。
@@ -96,6 +96,27 @@ esp_err_t result = ax900_connect_peap(&ap, &config);
 `associated` 仅表示无线关联；`authenticated` 表示 WPA2 密钥安装/控制端口开放；只有 `has_ip` 才表示 AX900 获得 DHCP 地址。官方演示中另一个 Wi-Fi AP 的 `192.168.4.1` 不能作为 AX900 已联网的证据。
 `ax900 associate` 只测试无线关联，不发送用户名或密码，不开放数据端口，成功后 10 秒自动断开。
 `ax900 probe` 与界面 **Run test** 使用同一个异步测试模块，通过 AX900 接口向 DHCP 网关发送 5 次 ICMP 请求。测试期间禁止重复启动；断开或重连后旧结果标记为过期。网关 Ping 只验证局域网可达性。官方图形固件通过 `xTaskCreateWithCaps()` 将 Ping 任务栈放入 PSRAM，避免显示和 PEAP 占用内部 RAM 后创建任务失败；仍使用所选 ESP-IDF 自带 ICMP 实现。
+
+## 断线与 USB 恢复
+
+意外断线、USB 拔出再接入、USB 接收/发送故障及 DHCP 最终超时，会使用已保存的登录信息尝试恢复。选定网络后只重连相同原始 SSID 和安全类型，不会切换到另一个已保存网络。每次恢复先扫描，优先匹配的 5 GHz AP。
+
+- Wi-Fi 重试间隔为 1、2、4、8、16 秒，最多 5 次；扫描和认证耗时另计，启动时的自动连接也计入本轮次数。连接连续稳定 60 秒后重置次数，短时间反复掉线不会无限重试。
+- 认证失败或认证阶段超时暂停自动重试，重新选择网络才恢复。手动 Disconnect、Forget saved 和仅关联诊断也会禁止自动重连；USB 热插拔不会解除这个选择。重启后恢复正常的已保存网络启动策略。
+- DHCP 首次等待 30 秒，随后最多重启 DHCP 两次；仍无地址时断开并进入上述已保存网络恢复流程。未成功保存的新网络不会在失败后持久化凭据。
+- USB 传输等待最多 3 秒，取消额外等待最多 500 毫秒。尚未返回的回调继续持有堆上的传输对象；工作任务继续处理事件，不会释放 USB 主机仍在使用的内存。若底层一直不归还传输，提示重新插拔或重启，最多保留一个设备的未完成传输。
+- USB 初始化/传输恢复最多 3 次，间隔 1、2、4 秒；普通取消/事务错误保留端点数据序号；设备 STALL 使用标准 CLEAR_FEATURE 并重新同步端点。运行中恢复跳过已经完成的固件栈启动步骤，无线层与网络接口全部初始化成功后才公布 ready。连续运行 60 秒重置 USB 次数，达到上限需重新插拔。
+
+`ax900_status_t` 提供重连开关、等待状态、次数、下一次等待毫秒数，以及 USB 故障/恢复计数和最近错误。上限或暂停状态通过状态文本显示。
+
+开发固件可在 menuconfig 的 AX900 菜单启用 `CONFIG_AX900_FAULT_INJECTION`，增加本地命令 `ax900 fault-rx`、`ax900 fault-link`、`ax900 fault-dhcp`。默认关闭；RX 测试实际取消 USB IN 传输，link 测试主动断开后进入恢复流程，DHCP 测试触发最终超时分支。它们不等价于物理拔插、AP 断电或真实 DHCP 服务器故障。
+
+```sh
+# 在本机已安装 pyserial 的环境运行，仅适用于启用故障注入的开发固件
+python3 tools/test_recovery_hardware.py --port /dev/cu.usbmodem1101 --rounds 3
+```
+
+该脚本记录本机 `logs/` 下的原始串口输出，终端只显示无账号、SSID、MAC、IP 的汇总；最后验证手动断开并保持离线。运行日志、截图、抓包和本机验证明细不上传 GitHub 或其他云端。Git 忽略 `logs/`、`*.log`、`*.log.*`、`*.pcap`、`*.pcapng`；不要强制添加这些文件。
 
 ## 官方界面与诊断
 
@@ -130,6 +151,21 @@ mkdir -p logs
 macOS 重开 CDC 串口可能使设备复位；脚本默认等待 16 秒以避开启动动画。日志和快照含附近网络信息，默认保存在 Git 忽略的 `logs/` 目录。凭据输入窗口打开时拒绝截图；串口键盘诊断只返回是否连接，不输出按键内容。
 
 ## 主机测试
+
+恢复测试直接编译生产 USB 工作任务，模拟 USB 主机的传输所有权，覆盖迟到回调、取消不归还、RX 错误/提交失败、初始化清理、重试上限、网络选择和用户取消：
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-misleading-indentation \
+  -fsanitize=address,undefined -I tests/recovery_host -I tests/profile_host \
+  -I tests/probe_host -I components/ax900/include -I components/ax900 \
+  tests/recovery_test.c -o /tmp/ax900-recovery-test
+/tmp/ax900-recovery-test
+cc -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-misleading-indentation \
+  -fsanitize=address,undefined -I tests/recovery_host -I tests/probe_host \
+  -I components/ax900/include -I components/ax900 \
+  tests/wifi_recovery_test.c -o /tmp/ax900-radio-recovery-test
+/tmp/ax900-radio-recovery-test
+```
 
 本地记忆与键盘映射测试（键盘需先应用官方补丁）：
 

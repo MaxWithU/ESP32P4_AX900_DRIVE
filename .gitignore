@@ -4,6 +4,11 @@
 /sdkconfig.old
 /build-*/
 /logs/
+*.log
+*.log.*
+*.pcap
+*.pcapng
+*.core
 /managed_components/
 /LOCAL_NOTES.md
 /VALIDATION.local.json

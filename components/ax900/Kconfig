@@ -1,0 +1,8 @@
+menu "AX900 USB Wi-Fi"
+config AX900_FAULT_INJECTION
+    bool "Enable local serial fault injection diagnostics"
+    default n
+    help
+        Enables controlled RX cancellation, link drop, and DHCP timeout tests.
+        Disabled by default. Only for development firmware.
+endmenu

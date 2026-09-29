@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include "mbedtls/platform_util.h"
 #include "ax900_profile.h"
+#include "ax900_recovery.h"
+#include "ax900_diagnostics.h"
 
 static usb_host_client_handle_t client;
 static ax900_device_t *active;
@@ -18,7 +20,40 @@ static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
 static ax900_status_t state;
 static bool scan_requested, connect_requested, disconnect_requested;
 static ax_connect_request_t *requested_connection;
-static bool forget_requested, auto_reconnect_pending=true;
+static bool forget_requested, automatic_request;
+static ax_recovery_t recovery={.enabled=true,.pending=true};
+static ax900_ap_t target;
+static bool target_valid;
+static uint8_t usb_attempts[128];
+static int64_t usb_retry_at[128], usb_stable_since;
+// The transfer and callback context outlive a timed-out synchronous call.
+struct ax_usb_wait { usb_transfer_t *transfer; bool done; };
+#if CONFIG_AX900_FAULT_INJECTION
+static ax900_fault_t fault_requested;
+esp_err_t ax900_debug_fault(ax900_fault_t fault) {
+    if(fault<AX900_FAULT_RX || fault>AX900_FAULT_DHCP)return ESP_ERR_INVALID_ARG;
+    taskENTER_CRITICAL(&lock);
+    bool ready=state.ready && !state.scanning && !state.connecting && !fault_requested &&
+        (fault==AX900_FAULT_RX || state.has_ip);
+    if(ready)fault_requested=fault;
+    taskEXIT_CRITICAL(&lock);
+    return ready?ESP_OK:ESP_ERR_INVALID_STATE;
+}
+#endif
+
+void ax_reconnect_lost(bool authentication_failure) {
+    taskENTER_CRITICAL(&lock);
+    if(authentication_failure)ax_recovery_select(&recovery,false);
+    else ax_recovery_lost(&recovery,esp_timer_get_time());
+    bool exhausted=!authentication_failure && !recovery.enabled && recovery.attempts>=AX_RETRY_LIMIT;
+    taskEXIT_CRITICAL(&lock);
+    if(authentication_failure)ax_status("Authentication failed; automatic retry paused");
+    else if(exhausted)ax_status("Reconnect limit reached; select a network to retry");
+}
+static bool same_network(const ax900_ap_t *a,const ax900_ap_t *b) {
+    return a->ssid_len==b->ssid_len && !memcmp(a->raw_ssid,b->raw_ssid,a->ssid_len) &&
+        a->secured==b->secured && a->enterprise==b->enterprise && a->wpa2_psk==b->wpa2_psk;
+}
 void ax_profile_status(bool saved,esp_err_t error) {
     unsigned count=ax_profile_count();
     taskENTER_CRITICAL(&lock);
@@ -43,6 +78,7 @@ bool ax900_connection_is_current(uint32_t connection_id) {
 }
 void ax_ip_state(const char *ip) {
     taskENTER_CRITICAL(&lock);
+    if(state.has_ip && (!ip || !ip[0]))state.connection_id++;
     state.has_ip=ip && ip[0] && state.authenticated;
     snprintf(state.ip,sizeof(state.ip),"%s",state.has_ip?ip:"");
     taskEXIT_CRITICAL(&lock);
@@ -55,13 +91,22 @@ void ax_packet_count(bool tx,bool dropped) {
 void ax_free_connect_request(ax_connect_request_t *request) {
     if(request){mbedtls_platform_zeroize(request,sizeof(*request));free(request);}
 }
-static esp_err_t queue_connect(ax_connect_request_t *request) {
+static esp_err_t queue_connect_intent(ax_connect_request_t *request,bool automatic,uint32_t intent) {
     taskENTER_CRITICAL(&lock);
     bool ready=state.ready && !state.scanning && !scan_requested && !state.connecting && !state.associated && !connect_requested;
-    if(ready){requested_connection=request;connect_requested=true;auto_reconnect_pending=false;state.connecting=true;state.connection_id++;state.connected_frequency=request->ap.frequency;}
+    ready=ready && !disconnect_requested && (!automatic || (recovery.enabled && recovery.intent==intent));
+    if(ready){
+        if(!automatic)ax_recovery_select(&recovery,!request->association_test);
+        target=request->ap;target_valid=true;
+        requested_connection=request;connect_requested=true;automatic_request=automatic;
+        state.connecting=true;state.connection_id++;state.connected_frequency=request->ap.frequency;
+    }
     taskEXIT_CRITICAL(&lock);
     if(!ready)ax_free_connect_request(request);
     return ready?ESP_OK:ESP_ERR_INVALID_STATE;
+}
+static esp_err_t queue_connect(ax_connect_request_t *request) {
+    return queue_connect_intent(request,false,0);
 }
 static bool valid_ap(const ax900_ap_t *ap) {
     return ap && ap->ssid_len && ap->ssid_len<=32 && ap->rsn_len<=sizeof(ap->rsn) && !(ap->bssid[0]&1);
@@ -101,7 +146,7 @@ esp_err_t ax900_test_association(const ax900_ap_t *ap) {
     return queue_connect(request);
 }
 esp_err_t ax900_disconnect(void) {
-    taskENTER_CRITICAL(&lock);bool ready=state.ready;if(ready){disconnect_requested=true;auto_reconnect_pending=false;}taskEXIT_CRITICAL(&lock);
+    taskENTER_CRITICAL(&lock);bool ready=client!=NULL;if(ready){disconnect_requested=true;ax_recovery_select(&recovery,false);}taskEXIT_CRITICAL(&lock);
     return ready?ESP_OK:ESP_ERR_INVALID_STATE;
 }
 esp_err_t ax900_connect_saved(const ax900_ap_t *ap) {
@@ -115,7 +160,7 @@ bool ax900_has_saved(const ax900_ap_t *ap) {
 }
 esp_err_t ax900_forget_saved(void) {
     if(!client)return ESP_ERR_INVALID_STATE;
-    taskENTER_CRITICAL(&lock);forget_requested=true;auto_reconnect_pending=false;taskEXIT_CRITICAL(&lock);
+    taskENTER_CRITICAL(&lock);forget_requested=true;ax_recovery_select(&recovery,false);taskEXIT_CRITICAL(&lock);
     return ESP_OK;
 }
 static const char *TAG="AX900";
@@ -128,7 +173,12 @@ void ax_status(const char *text) {
 }
 void ax900_get_status(ax900_status_t *out) {
     if (!out) return;
-    taskENTER_CRITICAL(&lock); *out=state; taskEXIT_CRITICAL(&lock);
+    taskENTER_CRITICAL(&lock); *out=state;
+    out->reconnect_enabled=recovery.enabled;out->reconnect_pending=recovery.pending;
+    out->reconnect_attempts=recovery.attempts;
+    int64_t remaining=recovery.due-esp_timer_get_time();
+    out->reconnect_in_ms=recovery.pending && remaining>0?(uint32_t)(remaining/1000):0;
+    taskEXIT_CRITICAL(&lock);
 }
 void ax_set_ready(bool band5) {
     taskENTER_CRITICAL(&lock);
@@ -193,47 +243,64 @@ static void dispatch_message(void *arg,uint16_t id,const uint8_t *p,size_t n) {
         d->reply_done=true;
     } else ax_message(d,id,p,n);
 }
+static void transport_fault(ax900_device_t *d,esp_err_t error) {
+    if(d->stopping || d->gone || d->fault)return;
+    d->fault=true;d->reply_error=error;d->reply_done=true;
+    taskENTER_CRITICAL(&lock);
+    state.ready=false;state.has_ip=false;state.ip[0]=0;
+    state.usb_errors++;state.transport_error=error;
+    taskEXIT_CRITICAL(&lock);
+}
 static void receive_cb(usb_transfer_t *t) {
     ax900_device_t *d=t->context;d->rx_pending=false;
-    if(t->status!=USB_TRANSFER_STATUS_COMPLETED) {
-        if(!d->stopping && !d->gone) {d->reply_error=ESP_FAIL;d->reply_done=true;}
-        return;
+    if(d->stopping || d->gone || d->fault)return;
+    if(t->status!=USB_TRANSFER_STATUS_COMPLETED){
+        d->endpoint_stalled=t->status==USB_TRANSFER_STATUS_STALL;transport_fault(d,ESP_FAIL);return;
     }
     if(!ax_walk_records(t->data_buffer,t->actual_num_bytes,dispatch_message,ax_net_receive,d))
         ESP_LOGW(TAG,"Malformed USB record discarded");
-    if(!d->stopping && !d->gone) {
-        esp_err_t e=usb_host_transfer_submit(t);
-        d->rx_pending=e==ESP_OK;
-        if(e!=ESP_OK){d->reply_error=e;d->reply_done=true;}
-    }
-}
-static void done_cb(usb_transfer_t *t) {*(bool *)t->context=true;}
-
-static esp_err_t transfer(ax900_device_t *d,uint8_t ep,uint8_t *p,size_t n,size_t *got) {
-    usb_transfer_t *t=NULL;TRY(usb_host_transfer_alloc(n,0,&t));
-    bool done=false;
-    t->device_handle=d->usb;t->bEndpointAddress=ep;t->num_bytes=n;
-    t->callback=done_cb;t->context=&done;
-    if(!(ep&0x80)){memcpy(t->data_buffer,p,n);t->flags=USB_TRANSFER_FLAG_ZERO_PACK;}
     esp_err_t e=usb_host_transfer_submit(t);
+    d->rx_pending=e==ESP_OK;
+    if(e!=ESP_OK)transport_fault(d,e);
+}
+static void done_cb(usb_transfer_t *t) {((struct ax_usb_wait *)t->context)->done=true;}
+static void free_tx(ax900_device_t *d) {
+    usb_host_transfer_free(d->tx->transfer);free(d->tx);d->tx=NULL;
+}
+static void cancel_endpoint(ax900_device_t *d,uint8_t ep) {
+    (void)usb_host_endpoint_halt(d->usb,ep);
+    (void)usb_host_endpoint_flush(d->usb,ep);
+}
+static esp_err_t transfer(ax900_device_t *d,uint8_t ep,uint8_t *p,size_t n,size_t *got) {
+    if(d->gone || d->stopping || d->fault || d->tx)return ESP_ERR_INVALID_STATE;
+    struct ax_usb_wait *wait=calloc(1,sizeof(*wait));if(!wait)return ESP_ERR_NO_MEM;
+    usb_transfer_t *t=NULL;esp_err_t e=usb_host_transfer_alloc(n,0,&t);
+    if(e!=ESP_OK){free(wait);return e;}
+    wait->transfer=t;d->tx=wait;
+    t->device_handle=d->usb;t->bEndpointAddress=ep;t->num_bytes=n;
+    t->callback=done_cb;t->context=wait;
+    if(!(ep&0x80)){memcpy(t->data_buffer,p,n);t->flags=USB_TRANSFER_FLAG_ZERO_PACK;}
+    e=ep?usb_host_transfer_submit(t):usb_host_transfer_submit_control(client,t);
     if(e==ESP_OK) {
         int64_t until=esp_timer_get_time()+3000000;
-        while(!done && esp_timer_get_time()<until)ax_pump(10);
-        if(!done) {
-            usb_host_endpoint_halt(d->usb,ep);usb_host_endpoint_flush(d->usb,ep);
-            // Wait for cancellation ownership to return before freeing callback context.
-            while(!done)ax_pump(10);
-            if(!d->gone)usb_host_endpoint_clear(d->usb,ep);
-            e=ESP_ERR_TIMEOUT;
-        } else if(t->status!=USB_TRANSFER_STATUS_COMPLETED)e=ESP_FAIL;
-        if(got)*got=t->actual_num_bytes;
+        while(!wait->done && !d->gone && !d->fault && esp_timer_get_time()<until)ax_pump(10);
+        if(!wait->done) {
+            e=ESP_ERR_TIMEOUT;transport_fault(d,e);cancel_endpoint(d,ep);
+            until=esp_timer_get_time()+500000;
+            while(!wait->done && esp_timer_get_time()<until)ax_pump(10);
+            // Keep the heap context/transfer/device alive until the late callback.
+            if(!wait->done)return e;
+        } else if(t->status!=USB_TRANSFER_STATUS_COMPLETED){d->endpoint_stalled=t->status==USB_TRANSFER_STATUS_STALL;e=ESP_FAIL;}
+        if(e==ESP_OK && (t->actual_num_bytes<0 || (size_t)t->actual_num_bytes>n))e=ESP_ERR_INVALID_SIZE;
+        if(e==ESP_OK && ep && !(ep&0x80) && (size_t)t->actual_num_bytes!=n)e=ESP_ERR_INVALID_SIZE;
+        if(e==ESP_OK && got)*got=t->actual_num_bytes;
         if(e==ESP_OK && (ep&0x80))memcpy(p,t->data_buffer,t->actual_num_bytes);
-        if(e==ESP_OK && !(ep&0x80) && t->actual_num_bytes!=n)e=ESP_ERR_INVALID_SIZE;
     }
-    usb_host_transfer_free(t);return e;
+    if(e!=ESP_OK)transport_fault(d,e);
+    free_tx(d);return e;
 }
 esp_err_t ax_data_tx(ax900_device_t *d,const uint8_t *ethernet,size_t length) {
-    if(!d || d->gone || !d->associated || d->station==0xff || !d->data_ep)return ESP_ERR_INVALID_STATE;
+    if(!d || d->gone || d->fault || d->stopping || !d->associated || d->station==0xff || !d->data_ep)return ESP_ERR_INVALID_STATE;
     if(length<14 || length>1518)return ESP_ERR_INVALID_SIZE;
     size_t n=4+sizeof(struct aic_wire_tx_host_descriptor)+length-14;
     uint8_t *frame=calloc(1,n);if(!frame)return ESP_ERR_NO_MEM;
@@ -248,12 +315,13 @@ esp_err_t ax_data_tx(ax900_device_t *d,const uint8_t *ethernet,size_t length) {
     return e;
 }
 esp_err_t ax_command(ax900_device_t *d,uint16_t req,uint16_t cfm,const void *p,size_t n,void *r,size_t cap,size_t *got) {
-    if(d->gone || n>2048 || (n&&!p))return ESP_ERR_INVALID_STATE;
+    if(d->gone || d->fault || d->stopping || n>2048 || (n&&!p))return ESP_ERR_INVALID_STATE;
     if(!d->rx) {
         TRY(usb_host_transfer_alloc(16384,0,&d->rx));
         d->rx->device_handle=d->usb;d->rx->bEndpointAddress=d->in_ep;
         d->rx->num_bytes=16384;d->rx->callback=receive_cb;d->rx->context=d;
-        TRY(usb_host_transfer_submit(d->rx));d->rx_pending=true;
+        esp_err_t e=usb_host_transfer_submit(d->rx);
+        if(e!=ESP_OK){transport_fault(d,e);return e;}d->rx_pending=true;
     }
     uint8_t *frame=calloc(1,n+16);if(!frame)return ESP_ERR_NO_MEM;
     put16(frame,n+12);frame[2]=0x11;put16(frame+8,req);
@@ -263,9 +331,9 @@ esp_err_t ax_command(ax900_device_t *d,uint16_t req,uint16_t cfm,const void *p,s
     esp_err_t e=transfer(d,d->out_ep,frame,n+16,NULL);free(frame);
     if(e==ESP_OK && cfm) {
         int64_t until=esp_timer_get_time()+5000000;
-        while(!d->reply_done && !d->gone && esp_timer_get_time()<until)ax_pump(10);
-        if(d->gone)e=ESP_ERR_INVALID_STATE;
-        else if(!d->reply_done)e=ESP_ERR_TIMEOUT;
+        while(!d->reply_done && !d->gone && !d->fault && esp_timer_get_time()<until)ax_pump(10);
+        if(d->gone || d->fault)e=ESP_ERR_INVALID_STATE;
+        else if(!d->reply_done){e=ESP_ERR_TIMEOUT;transport_fault(d,e);}
         else e=d->reply_error;
         if(e==ESP_OK) {
             if(got)*got=d->reply_len;
@@ -284,18 +352,55 @@ static void event_cb(const usb_host_client_event_msg_t *e,void *arg) {
         if(active && active->usb==e->dev_gone.dev_hdl)active->gone=true;
     }
 }
-static void stop_device(ax900_device_t *d) {
-    d->stopping=true;
-    if(d->runtime)ax_net_stop(d);
-    if(d->rx_pending) {
-        usb_host_endpoint_halt(d->usb,d->in_ep);usb_host_endpoint_flush(d->usb,d->in_ep);
-        while(d->rx_pending)ax_pump(10);
+// Nonblocking teardown: never free objects still owned by the USB host.
+static bool drain_device(ax900_device_t *d) {
+    if(!d->stopping) {
+        d->stopping=true;d->drain_started=esp_timer_get_time();
+        taskENTER_CRITICAL(&lock);
+        state.ready=false;state.scanning=false;state.ap_count=0;scan_requested=false;
+        connect_requested=false;ax_connect_request_t *cancelled=requested_connection;requested_connection=NULL;
+        taskEXIT_CRITICAL(&lock);
+        ax_free_connect_request(cancelled);
+        if(d->runtime)ax_net_stop(d);
+        ax_link_state(false,false,false,NULL,0);
+        if(d->rx_pending)cancel_endpoint(d,d->in_ep);
+        if(d->tx && !d->tx->done)cancel_endpoint(d,d->tx->transfer->bEndpointAddress);
     }
-    if(d->rx)usb_host_transfer_free(d->rx);
-    usb_host_interface_release(client,d->usb,d->interface);
-    free(d);active=NULL;
+    if(d->rx_pending || (d->tx && !d->tx->done)) {
+        if(!d->drain_reported && esp_timer_get_time()-d->drain_started>=500000){
+            d->drain_reported=true;ax_status("USB cancellation pending; replug AX900 or restart device");
+        }
+        return false;
+    }
+    if(d->tx)free_tx(d);
+    if(d->rx){usb_host_transfer_free(d->rx);d->rx=NULL;}
+    return true;
 }
-static esp_err_t attach_device(uint8_t address) {
+static bool stop_device(ax900_device_t *d) {
+    if(!drain_device(d))return false;
+    if(!d->gone && !d->interface_released) {
+        (void)usb_host_endpoint_clear(d->usb,d->in_ep);
+        (void)usb_host_endpoint_clear(d->usb,d->out_ep);
+        if(d->data_ep && d->data_ep!=d->out_ep)(void)usb_host_endpoint_clear(d->usb,d->data_ep);
+    }
+    if(!d->interface_released){
+        if(usb_host_interface_release(client,d->usb,d->interface)!=ESP_OK)return false;
+        d->interface_released=true;
+    }
+    uint8_t address=d->address;
+    if(usb_host_device_close(client,d->usb)!=ESP_OK)return false;
+    opened[address]=NULL;
+    free(d);active=NULL;return true;
+}
+static void retry_usb(uint8_t address) {
+    if(removed[address])return;
+    if(usb_attempts[address]>=3){ax_status("USB recovery limit reached; replug AX900");return;}
+    usb_retry_at[address]=esp_timer_get_time()+(INT64_C(1000000)<<usb_attempts[address]);
+    usb_attempts[address]++;
+    taskENTER_CRITICAL(&lock);state.usb_recoveries++;taskEXIT_CRITICAL(&lock);
+    ax_status("Recovering AX900 USB transport");
+}
+static esp_err_t attach_device_inner(uint8_t address) {
     TRY(usb_host_device_open(client,address,&opened[address]));
     const usb_device_desc_t *desc;const usb_config_desc_t *cfg;
     TRY(usb_host_get_device_descriptor(opened[address],&desc));
@@ -308,7 +413,7 @@ static esp_err_t attach_device(uint8_t address) {
     TRY(usb_host_get_active_config_descriptor(opened[address],&cfg));
     usb_print_config_descriptor(cfg,NULL);
     ax900_device_t *d=calloc(1,sizeof(*d));if(!d)return ESP_ERR_NO_MEM;
-    d->usb=opened[address];d->runtime=runtime;d->station=0xff;
+    d->usb=opened[address];d->address=address;d->runtime=runtime;d->station=0xff;
     const uint8_t *raw=(const uint8_t *)cfg;bool selected=false;
     for(size_t off=cfg->bLength;off+2<=cfg->wTotalLength;) {
         size_t len=raw[off];if(len<2 || off+len>cfg->wTotalLength)break;
@@ -345,69 +450,148 @@ static esp_err_t attach_device(uint8_t address) {
         ax_status("Initializing AX900 radio");
         e=ax_runtime_init(d);
         if(e==ESP_OK)e=ax_net_init(d);
-        if(e==ESP_OK)ax900_request_scan();
+        if(e==ESP_OK){
+            ax_set_ready(d->supports_5ghz);usb_stable_since=esp_timer_get_time();
+            ax_status("AX900 radio ready");
+            taskENTER_CRITICAL(&lock);if(!recovery.enabled)scan_requested=true;taskEXIT_CRITICAL(&lock);
+        }
     }
     return e;
 }
-static void client_task(void *arg) {
-    for(;;) {
-        ax_pump(20);
-        taskENTER_CRITICAL(&lock);bool forget=forget_requested;forget_requested=false;
-        if(forget && requested_connection)requested_connection->skip_save=true;
-        taskEXIT_CRITICAL(&lock);
-        if(forget){ax_net_disable_save();esp_err_t e=ax_profile_forget();ax_profile_status(false,e);}
-        for(int i=1;i<128;i++) {
-            if(removed[i]) {
-                removed[i]=false;
-                if(active && active->usb==opened[i]) {
-                    stop_device(active);
-                    taskENTER_CRITICAL(&lock);state.ready=false;state.present=false;state.scanning=false;state.ap_count=0;scan_requested=false;connect_requested=false;disconnect_requested=false;ax_connect_request_t *cancelled=requested_connection;requested_connection=NULL;taskEXIT_CRITICAL(&lock);
-                    ax_free_connect_request(cancelled);
-                    ax_status("AX900 disconnected");
-                }
-                if(opened[i])usb_host_device_close(client,opened[i]);
-                opened[i]=NULL;
-            }
-            if(pending[i]) {
-                pending[i]=false;
-                esp_err_t e=attach_device(i);
-                if(e!=ESP_OK){char msg[96];snprintf(msg,sizeof(msg),"AX900 initialization failed: %s",esp_err_to_name(e));ax_status(msg);}
-            }
+static void recover_device(ax900_device_t *d) {
+    if(!drain_device(d) || !usb_retry_at[d->address] || esp_timer_get_time()<usb_retry_at[d->address])return;
+    usb_retry_at[d->address]=0;
+    // Preserve host data toggles for ordinary cancellation/transaction errors.
+    (void)usb_host_endpoint_clear(d->usb,d->in_ep);
+    (void)usb_host_endpoint_clear(d->usb,d->out_ep);
+    if(d->data_ep && d->data_ep!=d->out_ep)(void)usb_host_endpoint_clear(d->usb,d->data_ep);
+    esp_err_t e=ESP_OK;
+    bool stalled=d->endpoint_stalled || d->interface_released;
+    if(stalled){
+        // A device STALL requires CLEAR_FEATURE on EP0, not just a host-pipe clear.
+        // Reclaim the interface to reset host toggles, then reset device toggles too.
+        if(!d->interface_released)e=usb_host_interface_release(client,d->usb,d->interface);
+        if(e==ESP_OK){d->interface_released=true;e=usb_host_interface_claim(client,d->usb,d->interface,0);}
+        if(e==ESP_OK)d->interface_released=false;
+    }
+    d->stopping=false;d->fault=false;d->drain_reported=false;d->endpoint_stalled=false;
+    if(e==ESP_OK && stalled){
+        uint8_t endpoints[]={d->in_ep,d->out_ep,d->data_ep};
+        for(unsigned i=0;i<3 && e==ESP_OK;i++)if(endpoints[i]){
+            uint8_t clear[8]={2,1,0,0,endpoints[i],0,0,0};
+            e=transfer(d,0,clear,sizeof(clear),NULL);
         }
-        if(active && active->runtime && !active->gone) {
-            taskENTER_CRITICAL(&lock);
-            bool disconnect=disconnect_requested;disconnect_requested=false;
-            bool connect=connect_requested;connect_requested=false;
-            ax_connect_request_t *request=requested_connection;requested_connection=NULL;
-            taskEXIT_CRITICAL(&lock);
-            if(disconnect){ax_net_disconnect(active,3);connect=false;ax_free_connect_request(request);request=NULL;}
-            if(connect){
-                esp_err_t e=ax_net_connect(active,request);
-                if(e!=ESP_OK){ax_link_state(false,false,false,NULL,0);ax_status("Connection request failed");}
-            }
-            ax_net_poll(active);
-        }
-        taskENTER_CRITICAL(&lock);
-        bool scan=scan_requested && state.ready && !state.scanning && !state.connecting && !state.associated;
-        if(scan){scan_requested=false;state.scanning=true;state.ap_count=0;}
-        taskEXIT_CRITICAL(&lock);
-        if(scan && active && !active->gone) {
-            ax_status("Scanning 2.4 / 5 GHz");
-            esp_err_t e=ax_scan(active);
-            taskENTER_CRITICAL(&lock);state.scanning=false;state.scan_generation++;size_t count=state.ap_count;taskEXIT_CRITICAL(&lock);
-            char msg[96];snprintf(msg,sizeof(msg),"%s: %u networks",e==ESP_OK?"Scan complete":"Scan failed",(unsigned)count);ax_status(msg);
-            taskENTER_CRITICAL(&lock);bool reconnect=auto_reconnect_pending && !connect_requested && !disconnect_requested;taskEXIT_CRITICAL(&lock);
-            if(e==ESP_OK && reconnect) {
-                ax900_status_t *snapshot=malloc(sizeof(*snapshot));
-                if(snapshot){ax900_get_status(snapshot);ax_connect_request_t *r=ax_profile_find(snapshot->aps,snapshot->ap_count);free(snapshot);
-                    if(r){ESP_LOGI(TAG,"Reconnecting using saved Wi-Fi profile");(void)queue_connect(r);}}
-            }
-        }
+        if(e!=ESP_OK)d->endpoint_stalled=true; // finish device-side halt clearing on the next retry
+    }
+    if(e==ESP_OK)e=ax_runtime_init(d);
+    if(e==ESP_OK)e=ax_net_init(d);
+    if(e==ESP_OK){
+        ax_set_ready(d->supports_5ghz);usb_stable_since=esp_timer_get_time();
+        ax_status("AX900 USB transport recovered");
+        taskENTER_CRITICAL(&lock);if(!recovery.enabled)scan_requested=true;taskEXIT_CRITICAL(&lock);
+    } else transport_fault(d,e); // next worker iteration schedules the bounded retry
+}
+static void attach_device(uint8_t address) {
+    esp_err_t e=attach_device_inner(address);
+    if(e==ESP_OK)return;
+    ESP_LOGW(TAG,"Initialization failed: %s",esp_err_to_name(e));
+    if(active && active->address==address){
+        transport_fault(active,e);ax_reconnect_lost(false);
+        if(active->stopping && !active->gone)retry_usb(address);
+        // retry is scheduled by the worker once, before asynchronous cleanup.
+    } else {
+        if(opened[address]){usb_host_device_close(client,opened[address]);opened[address]=NULL;}
+        retry_usb(address);
     }
 }
+static void client_step(void) {
+    ax_pump(20);
+    taskENTER_CRITICAL(&lock);bool forget=forget_requested;forget_requested=false;
+    ax_connect_request_t *cancelled=NULL;
+    if(forget && requested_connection){
+        if(automatic_request){cancelled=requested_connection;requested_connection=NULL;connect_requested=false;state.connecting=false;}
+        else requested_connection->skip_save=true;
+    }
+    taskEXIT_CRITICAL(&lock);
+    ax_free_connect_request(cancelled);
+    if(forget){ax_net_disable_save();esp_err_t e=ax_profile_forget();ax_profile_status(false,e);}
+    if(active && (active->gone || active->fault) && !active->stopping) {
+        ax_reconnect_lost(false);
+        if(!active->gone)retry_usb(active->address);
+        else ax_status("AX900 disconnected; waiting for USB");
+        if(active->gone || !active->runtime)(void)stop_device(active);
+        else (void)drain_device(active);
+    }
+    if(active && active->stopping) {
+        if(active->gone || !active->runtime)(void)stop_device(active);
+        else recover_device(active);
+    }
+    for(int i=1;i<128;i++) {
+        if(removed[i]) {
+            usb_retry_at[i]=0;usb_attempts[i]=0;pending[i]=false;
+            if(active && active->address==i)continue; // host still owns a transfer
+            removed[i]=false;
+            if(opened[i])usb_host_device_close(client,opened[i]);opened[i]=NULL;
+            taskENTER_CRITICAL(&lock);if(!active)state.present=false;taskEXIT_CRITICAL(&lock);
+        }
+        if(!active && (pending[i] || (usb_retry_at[i] && esp_timer_get_time()>=usb_retry_at[i]))) {
+            pending[i]=false;usb_retry_at[i]=0;attach_device(i);
+        }
+    }
+    if(active && active->runtime && !active->gone && !active->fault && !active->stopping) {
+#if CONFIG_AX900_FAULT_INJECTION
+        taskENTER_CRITICAL(&lock);ax900_fault_t fault=fault_requested;fault_requested=0;taskEXIT_CRITICAL(&lock);
+        if(fault==AX900_FAULT_RX && active->rx_pending)cancel_endpoint(active,active->in_ep);
+        if(fault==AX900_FAULT_LINK){ax_net_disconnect(active,3);ax_reconnect_lost(false);}
+        if(fault==AX900_FAULT_DHCP)ax_net_debug_dhcp_timeout();
+#endif
+        taskENTER_CRITICAL(&lock);
+        bool disconnect=disconnect_requested;disconnect_requested=false;
+        bool connect=connect_requested;connect_requested=false;
+        ax_connect_request_t *request=requested_connection;requested_connection=NULL;
+        taskEXIT_CRITICAL(&lock);
+        if(disconnect){ax_net_disconnect(active,3);connect=false;ax_free_connect_request(request);request=NULL;}
+        if(connect){
+            esp_err_t e=ax_net_connect(active,request);
+            if(e!=ESP_OK){ax_link_state(false,false,false,NULL,0);ax_status("Connection request failed");ax_reconnect_lost(false);}
+        }
+        if(!active->fault && !active->gone)ax_net_poll(active);
+        if(esp_timer_get_time()-usb_stable_since>=AX_STABLE_US)usb_attempts[active->address]=0;
+    }
+    taskENTER_CRITICAL(&lock);
+    if(state.has_ip)ax_recovery_online(&recovery,esp_timer_get_time());
+    bool idle=state.ready && !state.scanning && !state.connecting && !state.associated && !connect_requested && !disconnect_requested;
+    bool automatic=idle && ax_recovery_take(&recovery,esp_timer_get_time());
+    uint32_t intent=recovery.intent;
+    bool scan=idle && (scan_requested || automatic);
+    if(scan){scan_requested=false;state.scanning=true;state.ap_count=0;}
+    taskEXIT_CRITICAL(&lock);
+    if(scan && active && !active->gone && !active->fault && !active->stopping) {
+        ax_status(automatic?"Reconnecting: scanning saved network":"Scanning 2.4 / 5 GHz");
+        esp_err_t e=ax_scan(active);
+        taskENTER_CRITICAL(&lock);state.scanning=false;state.scan_generation++;size_t count=state.ap_count;
+        bool reconnect=automatic && recovery.enabled && recovery.intent==intent && !connect_requested && !disconnect_requested;
+        ax900_ap_t desired=target;bool filter=target_valid;
+        taskEXIT_CRITICAL(&lock);
+        char msg[96];snprintf(msg,sizeof(msg),"%s: %u networks",e==ESP_OK?"Scan complete":"Scan failed",(unsigned)count);ax_status(msg);
+        bool queued=false;
+        if(e==ESP_OK && reconnect) {
+            ax900_status_t *snapshot=malloc(sizeof(*snapshot));
+            if(snapshot){
+                ax900_get_status(snapshot);size_t candidates=0;
+                for(size_t i=0;i<snapshot->ap_count;i++)if(!filter || same_network(&desired,&snapshot->aps[i]))snapshot->aps[candidates++]=snapshot->aps[i];
+                ax_connect_request_t *r=ax_profile_find(snapshot->aps,candidates);free(snapshot);
+                if(r){ESP_LOGI(TAG,"Reconnecting using saved Wi-Fi profile");queued=queue_connect_intent(r,true,intent)==ESP_OK;}
+            }
+        }
+        if(reconnect && !queued)ax_reconnect_lost(false);
+    }
+}
+static void client_task(void *arg) {for(;;)client_step();}
 esp_err_t ax900_start(void) {
     if(client)return ESP_ERR_INVALID_STATE;
     esp_err_t profile_error=ax_profile_init();ax_profile_status(false,profile_error);
+    if(!ax_profile_count())ax_recovery_select(&recovery,false);
     usb_host_client_config_t cfg={.is_synchronous=false,.max_num_event_msg=10,.async={.client_event_callback=event_cb}};
     TRY(usb_host_client_register(&cfg,&client));
     ax_status("Waiting for AX900");

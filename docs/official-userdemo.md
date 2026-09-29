@@ -51,6 +51,8 @@ idf.py -C platforms/tab5 -p /dev/cu.usbmodem1101 flash
 
 实体键盘使用量产 Tab5Keyboard 的 I²C 0x6D 协议（SDA=0、SCL=1），使用 ESP32-P4 的独立 LP I²C 控制器，Port A 继续使用原引脚 53/54，支持热接入。未使用旧的 TCA8418 测试程序；没有按键日志。`Aa` 按住为大写/Shift，`Sym` 按住使用符号层；Tab / Aa+Tab 切换焦点，Enter 从用户名移至密码、从密码移至 Connect，再按 Enter 连接；Esc 关闭输入窗口。可用 Tab 选中 Run test 再按 Enter。窗口状态栏显示键盘连接情况。
 
-认证且 DHCP 成功后自动保存最多 4 个网络，窗口显示 Wi-Fi saved。重启扫描后自动尝试最近成功的网络，优先同名 5 GHz AP；失败一次后留给用户操作。已保存的网络提供 Use saved login，也可直接输入新密码。Forget saved 只删除 AX900 命名空间，当前连接继续可用且不会立即重新保存。没有账号/密码串口输入或导出命令；凭据窗口禁止截图。NVS 默认未加密，详见 README。
+认证且 DHCP 成功后自动保存最多 4 个网络，窗口显示 Wi-Fi saved。重启扫描后自动尝试最近成功的网络，优先同名 5 GHz AP；意外掉线与 USB 故障使用有限退避重连；认证失败暂停，手动断开后保持离线。详细重试策略见 README。已保存的网络提供 Use saved login，也可直接输入新密码。Forget saved 只删除 AX900 命名空间，当前连接继续可用且不会立即重新保存。没有账号/密码串口输入或导出命令；凭据窗口禁止截图。NVS 默认未加密，详见 README。
 
 Ping 使用 SDK 自带实现，在启用 CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM 的 Tab5 固件上将任务栈放入 PSRAM；删除使用对应的 vTaskDeleteWithCaps。其他未启用外部任务栈的平台仍使用 SDK 默认分配方式。
+
+故障注入默认关闭。实机开发测试可在 menuconfig 的 AX900 菜单临时启用 `CONFIG_AX900_FAULT_INJECTION`，运行本仓库的 `tools/test_recovery_hardware.py`；验证后关闭该选项重新构建正式固件。原始串口、构建日志与截图只存本机忽略目录，不上传云端。
