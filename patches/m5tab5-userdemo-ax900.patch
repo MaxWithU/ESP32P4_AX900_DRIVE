@@ -1,0 +1,290 @@
+diff --git a/app/apps/app_launcher/view/view.cpp b/app/apps/app_launcher/view/view.cpp
+index 0636c52..a775492 100644
+--- a/app/apps/app_launcher/view/view.cpp
++++ b/app/apps/app_launcher/view/view.cpp
+@@ -51,6 +51,9 @@ void LauncherView::init()
+     _panels.push_back(std::make_unique<PanelGpioTest>());
+     _panels.push_back(std::make_unique<PanelMusic>());
+     _panels.push_back(std::make_unique<PanelComMonitor>());
++#ifdef ESP_PLATFORM
++    _panels.push_back(std::make_unique<PanelAx900>());
++#endif
+ 
+     for (auto& panel : _panels) {
+         panel->init();
+diff --git a/app/apps/app_launcher/view/view.h b/app/apps/app_launcher/view/view.h
+index 6684fe3..57ae00e 100644
+--- a/app/apps/app_launcher/view/view.h
++++ b/app/apps/app_launcher/view/view.h
+@@ -28,6 +28,18 @@ public:
+     virtual void update(bool isStacked) = 0;
+ };
+ 
++#ifdef ESP_PLATFORM
++class PanelAx900 : public PanelBase {
++public:
++    void init() override;
++    void update(bool isStacked) override;
++private:
++    std::unique_ptr<smooth_ui_toolkit::lvgl_cpp::Container> _button;
++    std::unique_ptr<smooth_ui_toolkit::lvgl_cpp::Label> _label;
++    std::unique_ptr<ui::Window> _window;
++};
++#endif
++
+ /**
+  * @brief
+  *
+diff --git a/platforms/tab5/CMakeLists.txt b/platforms/tab5/CMakeLists.txt
+index bec522e..827b312 100644
+--- a/platforms/tab5/CMakeLists.txt
++++ b/platforms/tab5/CMakeLists.txt
+@@ -8,6 +8,7 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+ 
+ set(EXTRA_COMPONENT_DIRS 
+     "../../dependencies"
++    "../../../../tab5-ax900/components/ax900"
+ ) 
+ 
+ project(m5stack_tab5)
+diff --git a/platforms/tab5/main/CMakeLists.txt b/platforms/tab5/main/CMakeLists.txt
+index 38a7e34..8b72e38 100644
+--- a/platforms/tab5/main/CMakeLists.txt
++++ b/platforms/tab5/main/CMakeLists.txt
+@@ -14,6 +14,6 @@ file(GLOB_RECURSE MY_HAL_SRCS
+     ./hal/*.cpp
+ )
+ 
+-idf_component_register(SRCS "app_main.cpp" ${APP_LAYER_SRCS} ${MY_HAL_SRCS}
++idf_component_register(SRCS "app_main.cpp" "ax900_console.cpp" ${APP_LAYER_SRCS} ${MY_HAL_SRCS}
+                     INCLUDE_DIRS "." ${APP_LAYER_INCS}
+                     EMBED_TXTFILES "../audio/canon_in_d.mp3" "../audio/startup_sfx.mp3" "../audio/shutdown_sfx.mp3")
+diff --git a/platforms/tab5/main/app_main.cpp b/platforms/tab5/main/app_main.cpp
+index a48f7bc..a40ec51 100644
+--- a/platforms/tab5/main/app_main.cpp
++++ b/platforms/tab5/main/app_main.cpp
+@@ -9,6 +9,7 @@
+ #include <memory>
+ #include <freertos/FreeRTOS.h>
+ #include <freertos/task.h>
++extern void ax900_console_poll();
+ 
+ extern "C" void app_main(void)
+ {
+@@ -24,6 +25,7 @@ extern "C" void app_main(void)
+     app::Init(callback);
+     while (!app::IsDone()) {
+         app::Update();
++        ax900_console_poll();
+         vTaskDelay(1);
+     }
+     app::Destroy();
+diff --git a/platforms/tab5/main/hal/hal_esp32.cpp b/platforms/tab5/main/hal/hal_esp32.cpp
+index dda5d57..e9f650b 100644
+--- a/platforms/tab5/main/hal/hal_esp32.cpp
++++ b/platforms/tab5/main/hal/hal_esp32.cpp
+@@ -13,6 +13,7 @@ extern "C" {
+ #include <freertos/task.h>
+ #include <bsp/m5stack_tab5.h>
+ #include <lv_demos.h>
++#include <ax900.h>
+ 
+ extern esp_lcd_touch_handle_t _lcd_touch_handle;
+ 
+@@ -112,7 +113,11 @@ void HalEsp32::init()
+     // lv_indev_set_display(lvTouchpad, lvDisp);
+ 
+     mclog::tagInfo(_tag, "usb host init");
++    setUsb5vEnable(false);
++    delay(1000);
+     bsp_usb_host_start(BSP_USB_HOST_POWER_MODE_USB_DEV, true);
++    setUsb5vEnable(true);
++    ESP_ERROR_CHECK(ax900_start());
+ 
+     mclog::tagInfo(_tag, "hid init");
+     hid_init();
+diff --git a/app/apps/app_launcher/view/panel_ax900.cpp b/app/apps/app_launcher/view/panel_ax900.cpp
+new file mode 100644
+index 0000000..2137d81
+--- /dev/null
++++ b/app/apps/app_launcher/view/panel_ax900.cpp
+@@ -0,0 +1,108 @@
++// SPDX-License-Identifier: MIT
++#ifdef ESP_PLATFORM
++#include "view.h"
++#include <ax900.h>
++#include <hal/hal.h>
++#include <algorithm>
++#include <cstdio>
++
++using namespace launcher_view;
++using namespace smooth_ui_toolkit::lvgl_cpp;
++static bool openRequested=false;
++void ax900_ui_request_open() {openRequested=true;}
++
++class Ax900Window : public ui::Window {
++public:
++    Ax900Window() {
++        config.kfClosed={490,-320,180,44,0};
++        config.kfOpened={0,0,1000,590,255};
++        config.title="AX900 Wi-Fi   /   2.4 + 5 GHz";
++        config.bgColor=0x18242B;config.closeBtn=true;config.clickBgClose=false;
++    }
++    void onOpen() override {
++        _status=std::make_unique<Label>(_window->get());
++        _status->align(LV_ALIGN_TOP_LEFT,24,58);
++        _status->setTextFont(&lv_font_montserrat_18);
++        _status->setTextColor(lv_color_hex(0xB5CFDD));
++        _scan=std::make_unique<Container>(_window->get());
++        _scan->setSize(135,46);_scan->align(LV_ALIGN_TOP_RIGHT,-26,50);
++        _scan->setBgColor(lv_color_hex(0x247F9C));_scan->setBorderWidth(0);
++        _scanLabel=std::make_unique<Label>(_scan->get());
++        _scanLabel->align(LV_ALIGN_CENTER,0,0);_scanLabel->setText("Scan again");
++        _scan->onClick().connect([]{ax900_request_scan();});
++        _list=std::make_unique<Container>(_window->get());
++        _list->align(LV_ALIGN_TOP_LEFT,24,116);_list->setSize(952,438);
++        _list->setBgColor(lv_color_hex(0x111C22));_list->setBorderWidth(0);
++        _list->setPadding(14,14,14,14);
++        lv_obj_set_flex_flow(_list->get(),LV_FLEX_FLOW_COLUMN);
++        lv_obj_set_scroll_dir(_list->get(),LV_DIR_VER);
++        _snapshot=std::make_unique<ax900_status_t>();
++        _generation=UINT32_MAX;_count=SIZE_MAX;
++        ax900_request_scan();refresh();
++    }
++    void onUpdate() override {
++        if((_state==Opening || _state==Opened) && GetHAL()->millis()-_time>=500)refresh();
++    }
++    void onClose() override {
++        _scanLabel.reset();_scan.reset();_status.reset();_list.reset();_snapshot.reset();
++    }
++private:
++    std::unique_ptr<Label> _status,_scanLabel;
++    std::unique_ptr<Container> _scan,_list;
++    std::unique_ptr<ax900_status_t> _snapshot;
++    uint32_t _time=0,_generation=UINT32_MAX;size_t _count=SIZE_MAX;
++    void refresh() {
++        if(!_snapshot)return;
++        _time=GetHAL()->millis();ax900_get_status(_snapshot.get());
++        auto &s=*_snapshot;
++        _status->setText(s.status);
++        if(s.ready && !s.scanning)lv_obj_remove_state(_scan->get(),LV_STATE_DISABLED);
++        else lv_obj_add_state(_scan->get(),LV_STATE_DISABLED);
++        if(_generation==s.scan_generation && _count==s.ap_count)return;
++        _generation=s.scan_generation;_count=s.ap_count;
++        lv_obj_clean(_list->get());
++        std::sort(s.aps,s.aps+s.ap_count,[](const ax900_ap_t&a,const ax900_ap_t&b) {
++            if((a.frequency>5000)!=(b.frequency>5000))return a.frequency>5000;
++            return a.rssi>b.rssi;
++        });
++        for(size_t i=0;i<s.ap_count;i++) {
++            auto &ap=s.aps[i];unsigned ch=ap.frequency>5000?(ap.frequency-5000)/5:(ap.frequency-2407)/5;
++            auto *row=lv_obj_create(_list->get());lv_obj_set_size(row,LV_PCT(100),58);
++            lv_obj_remove_flag(row,LV_OBJ_FLAG_SCROLLABLE);
++            lv_obj_set_style_bg_color(row,lv_color_hex(ap.frequency>5000?0x183D42:0x20303A),0);
++            lv_obj_set_style_border_width(row,0,0);
++            auto *name=lv_label_create(row);lv_obj_align(name,LV_ALIGN_LEFT_MID,0,0);
++            lv_obj_set_width(name,560);lv_label_set_long_mode(name,LV_LABEL_LONG_DOT);
++            lv_obj_set_style_text_font(name,&lv_font_montserrat_20,0);
++            lv_label_set_text(name,ap.ssid[0]?ap.ssid:"(hidden network)");
++            auto *detail=lv_label_create(row);lv_obj_align(detail,LV_ALIGN_RIGHT_MID,0,0);
++            lv_label_set_text_fmt(detail,"%s   CH %u   %d dBm",ap.frequency>5000?"5 GHz":"2.4 GHz",ch,ap.rssi);
++        }
++        if(!s.ap_count) {
++            auto *empty=lv_label_create(_list->get());
++            lv_label_set_text(empty,s.scanning?"Searching for nearby networks...":"No networks yet. Connect AX900 and scan again.");
++        }
++    }
++};
++
++void PanelAx900::init() {
++    _button=std::make_unique<Container>(lv_screen_active());
++    _button->setSize(180,44);_button->align(LV_ALIGN_TOP_RIGHT,-20,12);
++    _button->setBgColor(lv_color_hex(0x205868));_button->setBorderWidth(0);
++    _button->removeFlag(LV_OBJ_FLAG_SCROLLABLE);
++    _label=std::make_unique<Label>(_button->get());_label->align(LV_ALIGN_CENTER,0,0);
++    _label->setText("AX900 Wi-Fi");_label->setTextFont(&lv_font_montserrat_18);
++    _button->onClick().connect([this] {
++        if(!_window) {_window=std::make_unique<Ax900Window>();_window->init(lv_screen_active());_window->open();}
++    });
++}
++void PanelAx900::update(bool isStacked) {
++    if(openRequested && !isStacked && !_window) {
++        openRequested=false;
++        _window=std::make_unique<Ax900Window>();_window->init(lv_screen_active());_window->open();
++    }
++    if(_window) {_window->update();if(_window->getState()==ui::Window::Closed)_window.reset();}
++    if(isStacked)_button->removeFlag(LV_OBJ_FLAG_CLICKABLE);
++    else _button->addFlag(LV_OBJ_FLAG_CLICKABLE);
++}
++#endif
+diff --git a/platforms/tab5/main/ax900_console.cpp b/platforms/tab5/main/ax900_console.cpp
+new file mode 100644
+index 0000000..db50541
+--- /dev/null
++++ b/platforms/tab5/main/ax900_console.cpp
+@@ -0,0 +1,57 @@
++// SPDX-License-Identifier: MIT
++// Local USB diagnostic commands for repeatable hardware and display verification.
++#include <ax900.h>
++#include <hal/hal.h>
++#include <lvgl.h>
++#include <unistd.h>
++#include <cstdio>
++#include <cstring>
++#include <memory>
++#include <freertos/FreeRTOS.h>
++#include <freertos/task.h>
++extern void ax900_ui_request_open();
++
++static void snapshot() {
++    lv_draw_buf_t *buffer;
++    {LvglLockGuard lock;buffer=lv_snapshot_take(lv_screen_active(),LV_COLOR_FORMAT_RGB565);}
++    if(!buffer){printf("AXSNAP ERROR allocation\n");return;}
++    const unsigned width=buffer->header.w,height=buffer->header.h;
++    std::unique_ptr<char[]> line(new(std::nothrow) char[width*6+1]);
++    if(!line){lv_draw_buf_destroy(buffer);return;}
++    printf("AXSNAP BEGIN %u %u RGB565-RLE\n",width,height);
++    constexpr char hex[]="0123456789abcdef";
++    for(unsigned y=0;y<height;y++) {
++        const auto *row=reinterpret_cast<const uint16_t *>(buffer->data+y*buffer->header.stride);
++        size_t pos=0;
++        for(unsigned x=0;x<width;) {
++            uint16_t color=row[x];unsigned count=1;
++            while(count<255 && x+count<width && row[x+count]==color)count++;
++            uint8_t bytes[]={static_cast<uint8_t>(count),static_cast<uint8_t>(color),static_cast<uint8_t>(color>>8)};
++            for(auto b:bytes){line[pos++]=hex[b>>4];line[pos++]=hex[b&15];}
++            x+=count;
++        }
++        line[pos]=0;printf("AXSNAP ROW %u %s\n",y,line.get());
++        if(y%8==0)vTaskDelay(1);
++    }
++    printf("AXSNAP END\n");lv_draw_buf_destroy(buffer);
++}
++void ax900_console_poll() {
++    static char command[48];static size_t used=0;
++    // The default USB Serial/JTAG VFS uses non-blocking hardware reads already.
++    // O_NONBLOCK would skip its one-byte prefetch when no ring-buffer driver exists.
++    char input[64];ssize_t n=read(STDIN_FILENO,input,sizeof(input));
++    for(ssize_t i=0;i<n;i++) {
++        if(input[i]=='\n' || input[i]=='\r') {
++            command[used]=0;used=0;
++            if(!strcmp(command,"ax900 scan"))printf("AX900_SCAN_REQUEST %d\n",ax900_request_scan());
++            else if(!strcmp(command,"ax900 open"))ax900_ui_request_open();
++            else if(!strcmp(command,"ax900 snapshot"))snapshot();
++            else if(!strcmp(command,"ax900 status")) {
++                auto s=std::make_unique<ax900_status_t>();ax900_get_status(s.get());
++                unsigned band5=0;for(size_t j=0;j<s->ap_count;j++)band5+=s->aps[j].frequency>5000;
++                printf("AX900_STATUS ready=%d supports5=%d scanning=%d generation=%lu APs=%u band5=%u status=%s\n",
++                    s->ready,s->supports_5ghz,s->scanning,static_cast<unsigned long>(s->scan_generation),static_cast<unsigned>(s->ap_count),band5,s->status);
++            }
++        } else if(used<sizeof(command)-1)command[used++]=input[i];
++    }
++}
+diff --git a/platforms/tab5/sdkconfig.defaults b/platforms/tab5/sdkconfig.defaults
+--- a/platforms/tab5/sdkconfig.defaults
++++ b/platforms/tab5/sdkconfig.defaults
+@@ -42,3 +42,4 @@
+ CONFIG_LV_USE_FONT_COMPRESSED=y
+ CONFIG_LV_USE_DEMO_BENCHMARK=y
+ CONFIG_IDF_EXPERIMENTAL_FEATURES=y
++CONFIG_LV_USE_SNAPSHOT=y

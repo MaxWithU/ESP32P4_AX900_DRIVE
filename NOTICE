@@ -1,0 +1,16 @@
+ESP32P4 AX900 Driver
+===================
+
+The host driver and standalone example are licensed under Apache-2.0.
+Protocol declarations and implementation references are adapted from:
+  canmv-k230/rtsmart
+  kernel/bsp/maix3/drivers/extdrv/aic8800
+  commit e6ff4e73d2d213900f55e3b0628f258234335453
+  Copyright (c) 2026, Canaan Bright Sight Co., Ltd
+
+The optional M5Tab5-UserDemo integration patch is licensed under MIT.
+See patches/LICENSE.MIT for the original M5Stack copyright and license.
+
+Downloaded AIC8800 firmware and vendor configuration are separate works,
+not covered by the host driver's Apache-2.0 license. Their pinned origin
+and hashes are recorded in components/ax900/firmware/SOURCE.json.

@@ -1,0 +1,33 @@
+{
+  "repo": "https://github.com/gtxaspec/aic8800-wifi",
+  "commit": "a870f7f15170a5899bf0b98769896fd1a7d4bf1e",
+  "path": "USB/patch/for_Allwinner/A40/Android7/patch/mod/android/hardware/aw/wlan/firmware/aic/aic8800D",
+  "profile": "legacy-usb-d80-u02",
+  "files": [
+    {
+      "path": "fw_adid_8800d80_u02.bin",
+      "bytes": 1708,
+      "sha256": "a526cbd02fcdc495f049f3ad6b5933cb08cd984b16790c716a060d582fee1a56"
+    },
+    {
+      "path": "fw_patch_8800d80_u02.bin",
+      "bytes": 8280,
+      "sha256": "9aa28856629f3b5d03ab10028fb4364bcab435eb26cad67e26278a6f7fecafb6"
+    },
+    {
+      "path": "fw_patch_table_8800d80_u02.bin",
+      "bytes": 552,
+      "sha256": "e36b7e8d45f908b716903386949189e38ed316348ecc7460495b42c885d5210b"
+    },
+    {
+      "path": "fmacfw_8800d80_u02.bin",
+      "bytes": 317573,
+      "sha256": "c51e13cbff473212ebeb821dace3588014b3043fc927ab162244b917a4acb22f"
+    },
+    {
+      "path": "aic_userconfig_8800d80.txt",
+      "bytes": 1721,
+      "sha256": "6a5d5c110371886a8154539fbe3237b6f819091644b064d780fc64694a39ba63"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+AIC8800 firmware
+================
+
+The files in this repository are firmware for AIC8800-family devices. They are
+not covered by the Apache-2.0 license of the RT-Smart driver source and remain
+subject to the applicable vendor terms.

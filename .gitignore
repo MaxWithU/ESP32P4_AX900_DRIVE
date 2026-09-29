@@ -1,0 +1,17 @@
+/build/
+/backups/
+/sdkconfig
+/sdkconfig.old
+/build-*/
+/logs/
+/managed_components/
+/LOCAL_NOTES.md
+/VALIDATION.local.json
+/components/ax900/firmware/*.bin
+/components/ax900/firmware/aic_userconfig_8800d80.txt
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+.env
+.env.*

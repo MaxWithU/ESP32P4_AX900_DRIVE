@@ -1,0 +1,38 @@
+{
+  "date": "2026-09-29",
+  "board": "M5Stack Tab5 / ESP32-P4 v1.3",
+  "chip_register": "0xe1078820",
+  "usb_runtime": "a69c:8d81",
+  "firmware_version": "0x06090100",
+  "status": "AX900_STATUS ready=1 supports5=1 scanning=0 generation=2 APs=64 band5=45 status=Scan complete: 64 networks",
+  "application": "M5Tab5-UserDemo/platforms/tab5/build/m5stack_tab5.bin",
+  "application_bytes": 6141776,
+  "application_sha256": "368017f6ac0d6c20e9c1284b3099aa8eca29425e6c861ecbca5e5a73024feb86",
+  "parser_test": "ASan + UBSan: captured reply, truncation, aggregation, reserved bits, 100000 malformed input cases passed",
+  "implemented": [
+    "MSC eject",
+    "USB firmware upload",
+    "radio initialization",
+    "2.4 GHz and 5 GHz passive scan",
+    "official LVGL scan UI"
+  ],
+  "not_implemented": [
+    "STA association",
+    "WPA authentication",
+    "Ethernet RX/TX",
+    "esp_netif and DHCP"
+  ],
+  "evidence_note": "Hardware run completed on 2026-09-29; raw serial logs, SSIDs, screenshots and full flash backups are retained locally.",
+  "repository_verification": {
+    "date": "2026-09-29",
+    "source": "Export of staged repository files into an empty directory",
+    "esp_idf": "5.5.2",
+    "firmware": "All five files downloaded from pinned upstream commit and verified by size and SHA-256",
+    "build_command": "idf.py set-target esp32p4 build",
+    "standalone_application_bytes": 648080,
+    "standalone_application_sha256": "448f579d3b0667e12d0c0b5fb28dd7e0bbf2bdcd89b1900a7f157c3344732d25",
+    "official_patch": "Applied to b4e356bc491ca070d54004718dad789c07d5fc93; runtime source matches the previously tested integration",
+    "parser_test": "ASan and UBSan: captured reply, truncation, aggregation, reserved length bits and 100000 malformed inputs passed",
+    "device_flash": "No new flash during repository packaging"
+  }
+}
