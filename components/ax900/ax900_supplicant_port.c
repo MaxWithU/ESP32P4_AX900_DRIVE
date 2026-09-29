@@ -29,6 +29,7 @@ int eloop_cancel_timeout(eloop_timeout_handler fn,void *ctx,void *user) {
 int eloop_is_timeout_registered(eloop_timeout_handler fn,void *ctx,void *user) {
     for(size_t i=0;i<16;i++)if(timers[i].fn==fn && timers[i].ctx==ctx && timers[i].user==user)return 1;return 0;
 }
+void ax_supplicant_reset(void){memset(timers,0,sizeof(timers));}
 void ax_supplicant_poll(void) {
     int64_t now=esp_timer_get_time();for(size_t i=0;i<16;i++)if(timers[i].fn && timers[i].deadline<=now){struct ax_timeout t=timers[i];timers[i].fn=NULL;t.fn(t.ctx,t.user);}
 }

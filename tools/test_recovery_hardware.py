@@ -11,9 +11,10 @@ class Device:
     def __init__(self,port,log):
         self.port=serial.Serial(port=None,baudrate=115200,timeout=.1)
         self.port.dtr=self.port.rts=False;self.port.port=port;self.port.open()
-        self.log=log.open('ab');self.buffer=b'';self.link={};self.recovery={};self.probe={}
-        self.link_at=0;self.fault=None;self.probe_start=None;self.crashed=False
-    def command(self,s):self.port.write((s+'\n').encode())
+        self.log=log.open('ab');self.buffer=b'';self.status={};self.link={};self.recovery={};self.probe={}
+        self.link_at=0;self.fault=None;self.probe_start=None;self.check={};self.check_start=None;self.crashed=False
+        self.runtime={};self.metrics={};self.saved={}
+    def command(self,s):self.port.write(('\n'+s+'\n').encode())
     def pump(self,seconds=.2):
         until=time.monotonic()+seconds
         while time.monotonic()<until:
@@ -24,10 +25,16 @@ class Device:
                 raw,self.buffer=self.buffer.split(b'\n',1)
                 line=raw.decode(errors='replace')
                 if any(x in line for x in ['Guru Meditation','assert failed','abort()','Stack protection fault']):self.crashed=True
-                values={k:int(v) for k,v in re.findall(r'([a-z_]+)=(-?\d+)(?=\s|$)',line)}
-                if line.startswith('AX900_LINK '):self.link=values;self.link_at=time.monotonic()
+                values={k:int(v) for k,v in re.findall(r'([A-Za-z_][A-Za-z0-9_]*)=(-?\d+)(?=\s|$)',line)}
+                if line.startswith('AX900_STATUS '):self.status=values
+                elif line.startswith('AX900_LINK '):self.link=values;self.link_at=time.monotonic()
                 elif line.startswith('AX900_RECOVERY '):self.recovery=values
                 elif line.startswith('AX900_PROBE '):self.probe=values
+                elif line.startswith('AX900_CHECK '):self.check=values
+                elif line.startswith('AX900_RUNTIME '):self.runtime=values
+                elif line.startswith('AX900_METRICS '):self.metrics=values
+                elif line.startswith('AX900_SAVED '):self.saved=values
+                elif line.startswith('AX900_CHECK_START '):self.check_start=int(line.split()[1])
                 elif line.startswith('AX900_FAULT '):self.fault=int(line.split()[1])
                 elif line.startswith('AX900_PROBE_START '):self.probe_start=int(line.split()[1])
             if self.crashed:raise RuntimeError('Device crash; inspect local log')

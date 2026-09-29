@@ -112,12 +112,15 @@ diff --git a/app/apps/app_launcher/view/panel_ax900.cpp b/app/apps/app_launcher/
 new file mode 100644
 --- /dev/null
 +++ b/app/apps/app_launcher/view/panel_ax900.cpp
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,331 @@
 +// SPDX-License-Identifier: MIT
 +#ifdef ESP_PLATFORM
 +#include "view.h"
 +#include "ax900_test_view.h"
 +#include <ax900.h>
++#include <ax900_networks.h>
++#include <ax900_profiles.h>
++#include <bsp/m5stack_tab5.h>
 +#include <hal/hal.h>
 +#include <algorithm>
 +#include <cstdio>
@@ -179,11 +182,13 @@ new file mode 100644
 +        _memory=lv_label_create(_window->get());lv_obj_set_pos(_memory,680,111);
 +        lv_obj_set_style_text_font(_memory,&lv_font_montserrat_14,0);
 +        _forget=lv_button_create(_window->get());lv_obj_set_pos(_forget,766,50);lv_obj_set_size(_forget,154,46);
-+        auto *forgetText=lv_label_create(_forget);lv_label_set_text(forgetText,"Forget saved");lv_obj_center(forgetText);
-+        lv_obj_add_event_cb(_forget,[](lv_event_t *){ax900_forget_saved();},LV_EVENT_CLICKED,nullptr);
++        auto *forgetText=lv_label_create(_forget);lv_label_set_text(forgetText,"Saved networks");lv_obj_center(forgetText);
++        lv_obj_add_event_cb(_forget,[](lv_event_t *e){static_cast<Ax900Window *>(lv_event_get_user_data(e))->showSaved();},LV_EVENT_CLICKED,this);
 +        for(auto *tab:_tabs)lv_group_add_obj(_group,tab);
-+        lv_group_add_obj(_group,_scan->get());lv_group_add_obj(_group,_forget);lv_group_add_obj(_group,_testView->runButton());
-+        _snapshot=std::make_unique<ax900_status_t>();
++        lv_group_add_obj(_group,_scan->get());lv_group_add_obj(_group,_forget);_testView->addToGroup(_group);
++        _snapshot=std::make_unique<ax900_link_status_t>();
++        _networks=std::make_unique<ax900_network_t[]>(AX900_MAX_APS);_networkCount=0;
++        _scanResults=std::make_unique<ax900_ap_t[]>(AX900_MAX_APS);
 +        _generation=UINT32_MAX;_count=SIZE_MAX;
 +        ax900_request_scan();refresh();
 +    }
@@ -191,16 +196,19 @@ new file mode 100644
 +        if((_state==Opening || _state==Opened) && GetHAL()->millis()-_time>=500)refresh();
 +    }
 +    void onClose() override {
-+        closeDialog();
++        closeDialog();_testView.reset();
 +        tab5_keyboard_set_group(nullptr);lv_group_delete(_group);_group=nullptr;
 +        lv_obj_delete(_memory);lv_obj_delete(_forget);
-+        _testView.reset();for(auto *tab:_tabs)lv_obj_delete(tab);
-+        _scanLabel.reset();_scan.reset();_status.reset();_list.reset();_snapshot.reset();
++        for(auto *tab:_tabs)lv_obj_delete(tab);
++        _scanLabel.reset();_scan.reset();_status.reset();_list.reset();_snapshot.reset();_networks.reset();_scanResults.reset();_networkCount=0;
 +    }
 +private:
 +    std::unique_ptr<Label> _status,_scanLabel;
 +    std::unique_ptr<Container> _scan,_list;
-+    std::unique_ptr<ax900_status_t> _snapshot;
++    std::unique_ptr<ax900_link_status_t> _snapshot;
++    std::unique_ptr<ax900_network_t[]> _networks;
++    std::unique_ptr<ax900_ap_t[]> _scanResults;
++    size_t _networkCount=0;
 +    std::unique_ptr<Ax900TestView> _testView;
 +    lv_obj_t *_tabs[2]={};
 +    lv_obj_t *_memory=nullptr,*_forget=nullptr;
@@ -212,17 +220,54 @@ new file mode 100644
 +        _testView->show(show);
 +        for(unsigned i=0;i<2;i++)lv_obj_set_style_bg_color(_tabs[i],lv_color_hex((i==1)==show?0x247F9C:0x243743),0);
 +    }
-+    lv_obj_t *_dialog=nullptr,*_password=nullptr,*_dialogStatus=nullptr,*_username=nullptr,*_unverified=nullptr;
++    lv_obj_t *_dialog=nullptr,*_password=nullptr,*_dialogStatus=nullptr,*_username=nullptr,*_unverified=nullptr,*_server=nullptr,*_caFile=nullptr;
++    ax900_saved_network_t _saved[AX900_PROFILE_LIMIT]={};
 +    ax900_ap_t _selected={};
 +    void closeDialog() {
 +        if(_dialogGroup){tab5_keyboard_set_group(_group);lv_group_delete(_dialogGroup);_dialogGroup=nullptr;}
 +        if(_dialog){if(_password)lv_textarea_set_text(_password,"");if(_username)lv_textarea_set_text(_username,"");lv_obj_delete(_dialog);}
 +        credentialDialogOpen=false;
-+        _dialog=nullptr;_password=nullptr;_dialogStatus=nullptr;_username=nullptr;_unverified=nullptr;
++        _dialog=nullptr;_password=nullptr;_dialogStatus=nullptr;_username=nullptr;_unverified=nullptr;_server=nullptr;_caFile=nullptr;
++    }
++    void showSaved() {
++        if(_dialog || (_testView && _testView->settingsOpen()))return;
++        closeDialog();credentialDialogOpen=true;
++        _dialogGroup=lv_group_create();tab5_keyboard_set_group(_dialogGroup);
++        _dialog=lv_obj_create(lv_screen_active());lv_obj_set_size(_dialog,1080,620);lv_obj_center(_dialog);
++        lv_obj_set_style_bg_color(_dialog,lv_color_hex(0x18242B),0);
++        auto *title=lv_label_create(_dialog);lv_obj_set_pos(title,20,15);lv_label_set_text(title,"Saved networks");
++        _dialogStatus=lv_label_create(_dialog);lv_obj_set_pos(_dialogStatus,20,55);
++        lv_label_set_text(_dialogStatus,ax900_profiles_encrypted()?"Protected encrypted storage":"Device storage. Protected encryption is not provisioned.");
++        size_t count=ax900_list_saved(_saved,AX900_PROFILE_LIMIT);
++        for(size_t i=0;i<count && i<AX900_PROFILE_LIMIT;i++) {
++            auto *name=lv_label_create(_dialog);lv_obj_set_pos(name,25,120+i*85);lv_obj_set_width(name,480);
++            lv_label_set_long_mode(name,LV_LABEL_LONG_DOT);lv_label_set_text(name,_saved[i].network.ssid);
++            auto *autoConnect=lv_checkbox_create(_dialog);lv_obj_set_pos(autoConnect,540,115+i*85);
++            lv_checkbox_set_text(autoConnect,"Auto connect");if(_saved[i].auto_connect)lv_obj_add_state(autoConnect,LV_STATE_CHECKED);
++            lv_obj_set_user_data(autoConnect,reinterpret_cast<void *>(i+1));
++            lv_obj_add_event_cb(autoConnect,[](lv_event_t *e){auto *self=static_cast<Ax900Window *>(lv_event_get_user_data(e));
++                auto *object=static_cast<lv_obj_t *>(lv_event_get_current_target(e));size_t index=reinterpret_cast<size_t>(lv_obj_get_user_data(object))-1;
++                esp_err_t result=ax900_set_auto_connect(&self->_saved[index].network,lv_obj_has_state(object,LV_STATE_CHECKED));
++                lv_label_set_text(self->_dialogStatus,result==ESP_OK?"Auto-connect setting queued":esp_err_to_name(result));
++            },LV_EVENT_VALUE_CHANGED,this);lv_group_add_obj(_dialogGroup,autoConnect);
++            auto *remove=lv_button_create(_dialog);lv_obj_set_pos(remove,820,105+i*85);lv_obj_set_size(remove,185,50);
++            auto *label=lv_label_create(remove);lv_label_set_text(label,"Forget network");lv_obj_center(label);
++            lv_obj_set_user_data(remove,reinterpret_cast<void *>(i+1));
++            lv_obj_add_event_cb(remove,[](lv_event_t *e){auto *self=static_cast<Ax900Window *>(lv_event_get_user_data(e));
++                auto *object=static_cast<lv_obj_t *>(lv_event_get_current_target(e));size_t index=reinterpret_cast<size_t>(lv_obj_get_user_data(object))-1;
++                esp_err_t result=ax900_forget_network(&self->_saved[index].network);
++                lv_label_set_text(self->_dialogStatus,result==ESP_OK?"Removal queued. The current connection stays active.":esp_err_to_name(result));
++                if(result==ESP_OK)lv_obj_add_state(object,LV_STATE_DISABLED);
++            },LV_EVENT_CLICKED,this);lv_group_add_obj(_dialogGroup,remove);
++        }
++        auto *close=lv_button_create(_dialog);lv_obj_set_pos(close,830,515);lv_obj_set_size(close,175,50);
++        auto *label=lv_label_create(close);lv_label_set_text(label,"Close");lv_obj_center(label);
++        lv_obj_add_event_cb(close,[](lv_event_t *e){static_cast<Ax900Window *>(lv_event_get_user_data(e))->closeDialog();},LV_EVENT_CLICKED,this);
++        lv_group_add_obj(_dialogGroup,close);
 +    }
 +    void select(size_t index) {
-+        if(!_snapshot || _snapshot->scanning || index>=_snapshot->ap_count || _dialog)return;
-+        _selected=_snapshot->aps[index];
++        if(!_snapshot || _snapshot->scanning || index>=_networkCount || _dialog || (_testView && _testView->settingsOpen()))return;
++        _selected=_networks[index].preferred;
 +        credentialDialogOpen=true;
 +        _dialogGroup=lv_group_create();tab5_keyboard_set_group(_dialogGroup);
 +        _dialog=lv_obj_create(lv_screen_active());lv_obj_set_size(_dialog,1080,640);lv_obj_center(_dialog);
@@ -241,13 +286,17 @@ new file mode 100644
 +            _unverified=lv_checkbox_create(_dialog);lv_obj_align(_unverified,LV_ALIGN_TOP_LEFT,15,158);
 +            lv_checkbox_set_text(_unverified,"Server certificate not verified (untrusted server risk)");
 +            lv_obj_add_state(_unverified,LV_STATE_CHECKED);
++            _server=lv_textarea_create(_dialog);lv_obj_set_size(_server,495,52);lv_obj_align(_server,LV_ALIGN_TOP_LEFT,15,198);
++            lv_textarea_set_one_line(_server,true);lv_textarea_set_max_length(_server,253);lv_textarea_set_placeholder_text(_server,"Verified server DNS name (optional)");
++            _caFile=lv_textarea_create(_dialog);lv_obj_set_size(_caFile,495,52);lv_obj_align(_caFile,LV_ALIGN_TOP_LEFT,535,198);
++            lv_textarea_set_one_line(_caFile,true);lv_textarea_set_max_length(_caFile,127);lv_textarea_set_placeholder_text(_caFile,"CA file on SD: /sd/radius-ca.pem");
 +        }
 +        _password=lv_textarea_create(_dialog);lv_obj_set_size(_password,1015,58);lv_obj_align(_password,LV_ALIGN_TOP_LEFT,15,82);
 +        lv_textarea_set_one_line(_password,true);lv_textarea_set_password_mode(_password,true);lv_textarea_set_password_show_time(_password,0);
 +        if(_selected.enterprise){lv_obj_set_size(_password,495,58);lv_obj_align(_password,LV_ALIGN_TOP_LEFT,535,82);}
 +        lv_textarea_set_max_length(_password,_selected.enterprise?128:64);lv_textarea_set_placeholder_text(_password,_selected.enterprise?"Account password":"Wi-Fi password");
 +        if(!_selected.secured)lv_obj_add_state(_password,LV_STATE_DISABLED);
-+        auto *connect=lv_button_create(_dialog);lv_obj_set_size(connect,160,48);lv_obj_align(connect,LV_ALIGN_TOP_RIGHT,-15,220);
++        auto *connect=lv_button_create(_dialog);lv_obj_set_size(connect,160,48);lv_obj_align(connect,LV_ALIGN_TOP_RIGHT,-15,270);
 +        auto *label=lv_label_create(connect);lv_label_set_text(label,"Connect");lv_obj_center(label);
 +        lv_obj_add_event_cb(connect,[](lv_event_t *e){
 +            auto *self=static_cast<Ax900Window *>(lv_event_get_user_data(e));
@@ -256,22 +305,38 @@ new file mode 100644
 +            if(self->_selected.enterprise) {
 +                ax900_peap_config_t config={};config.username=lv_textarea_get_text(self->_username);config.password=password;
 +                config.allow_unverified_server=lv_obj_has_state(self->_unverified,LV_STATE_CHECKED);
++                std::unique_ptr<char[]> ca;
++                if(!config.allow_unverified_server) {
++                    const char *path=lv_textarea_get_text(self->_caFile);
++                    if(strncmp(path,"/sd/",4) || strstr(path,"..")){lv_label_set_text(self->_dialogStatus,"Choose a PEM CA file under /sd/ and its server DNS name.");return;}
++                    bool mounted=false;FILE *file=fopen(path,"rb");
++                    if(!file && bsp_sdcard_init("/sd",25)==ESP_OK){mounted=true;file=fopen(path,"rb");}
++                    long size=-1;if(file && !fseek(file,0,SEEK_END)){size=ftell(file);rewind(file);}
++                    bool valid=false;
++                    if(size>0 && size<=8192){ca.reset(new(std::nothrow) char[size+1]);if(ca && fread(ca.get(),1,size,file)==static_cast<size_t>(size)){ca[size]=0;valid=true;}}
++                    if(file)fclose(file);
++                    if(mounted)bsp_sdcard_deinit(const_cast<char *>("/sd"));
++                    if(!valid){lv_label_set_text(self->_dialogStatus,"Could not read CA (PEM, max 8192 bytes) from SD card.");return;}
++                    config.ca_cert_pem=ca.get();config.server_name=lv_textarea_get_text(self->_server);
++                }
 +                result=ax900_connect_peap(&self->_selected,&config);
 +            } else result=ax900_connect(&self->_selected,password);
 +            if(result==ESP_OK)self->closeDialog();
 +            else lv_label_set_text(self->_dialogStatus,result==ESP_ERR_INVALID_STATE?"Wait for scanning to finish, or disconnect first.":"Check account/password and certificate option.");
 +        },LV_EVENT_CLICKED,this);
 +        if(!supported)lv_obj_add_state(connect,LV_STATE_DISABLED);
-+        auto *cancel=lv_button_create(_dialog);lv_obj_set_size(cancel,140,48);lv_obj_align(cancel,LV_ALIGN_TOP_RIGHT,-195,220);
++        auto *cancel=lv_button_create(_dialog);lv_obj_set_size(cancel,140,48);lv_obj_align(cancel,LV_ALIGN_TOP_RIGHT,-195,270);
 +        label=lv_label_create(cancel);lv_label_set_text(label,"Cancel");lv_obj_center(label);
 +        lv_obj_add_event_cb(cancel,[](lv_event_t *e){static_cast<Ax900Window *>(lv_event_get_user_data(e))->closeDialog();},LV_EVENT_CLICKED,this);
-+        auto *keyboard=lv_keyboard_create(_dialog);lv_obj_set_size(keyboard,1040,310);lv_obj_align(keyboard,LV_ALIGN_BOTTOM_MID,0,-5);
++        auto *keyboard=lv_keyboard_create(_dialog);lv_obj_set_size(keyboard,1040,275);lv_obj_align(keyboard,LV_ALIGN_BOTTOM_MID,0,-5);
 +        auto focus=[](lv_event_t *e){lv_keyboard_set_textarea(static_cast<lv_obj_t *>(lv_event_get_user_data(e)),static_cast<lv_obj_t *>(lv_event_get_target(e)));};
 +        lv_obj_add_event_cb(_password,focus,LV_EVENT_FOCUSED,keyboard);
 +        if(_username)lv_obj_add_event_cb(_username,focus,LV_EVENT_FOCUSED,keyboard);
++        if(_server)lv_obj_add_event_cb(_server,focus,LV_EVENT_FOCUSED,keyboard);
++        if(_caFile)lv_obj_add_event_cb(_caFile,focus,LV_EVENT_FOCUSED,keyboard);
 +        lv_keyboard_set_textarea(keyboard,_username?_username:_password);
 +        if(ax900_has_saved(&_selected)) {
-+            auto *saved=lv_button_create(_dialog);lv_obj_set_size(saved,180,48);lv_obj_align(saved,LV_ALIGN_TOP_LEFT,15,220);
++            auto *saved=lv_button_create(_dialog);lv_obj_set_size(saved,180,48);lv_obj_align(saved,LV_ALIGN_TOP_LEFT,15,270);
 +            label=lv_label_create(saved);lv_label_set_text(label,"Use saved login");lv_obj_center(label);
 +            lv_obj_add_event_cb(saved,[](lv_event_t *e){auto *self=static_cast<Ax900Window *>(lv_event_get_user_data(e));
 +                if(ax900_connect_saved(&self->_selected)==ESP_OK)self->closeDialog();
@@ -282,6 +347,8 @@ new file mode 100644
 +        if(_username)lv_group_add_obj(_dialogGroup,_username);
 +        if(_selected.secured)lv_group_add_obj(_dialogGroup,_password);
 +        if(_unverified)lv_group_add_obj(_dialogGroup,_unverified);
++        if(_server)lv_group_add_obj(_dialogGroup,_server);
++        if(_caFile)lv_group_add_obj(_dialogGroup,_caFile);
 +        lv_group_add_obj(_dialogGroup,connect);lv_group_add_obj(_dialogGroup,cancel);
 +        auto advance=[](lv_event_t *e){
 +            lv_group_focus_obj(static_cast<lv_obj_t *>(lv_event_get_user_data(e)));
@@ -297,7 +364,7 @@ new file mode 100644
 +    uint32_t _time=0,_generation=UINT32_MAX;size_t _count=SIZE_MAX;
 +    void refresh() {
 +        if(!_snapshot)return;
-+        _time=GetHAL()->millis();ax900_get_status(_snapshot.get());
++        _time=GetHAL()->millis();ax900_get_link_status(_snapshot.get());
 +        auto &s=*_snapshot;
 +        openRequested=false;
 +        if(testRequested && !_dialog){showTest(true);testRequested=false;}
@@ -310,19 +377,25 @@ new file mode 100644
 +        _scanLabel->setText((s.associated || s.connecting)?"Disconnect":"Scan again");
 +        if(s.ready && !s.scanning)lv_obj_remove_state(_scan->get(),LV_STATE_DISABLED);
 +        else lv_obj_add_state(_scan->get(),LV_STATE_DISABLED);
-+        std::sort(s.aps,s.aps+s.ap_count,[](const ax900_ap_t&a,const ax900_ap_t&b) {
-+            if((a.frequency>5000)!=(b.frequency>5000))return a.frequency>5000;
-+            return a.rssi>b.rssi;
-+        });
-+        if(selectRequested[0] && !s.scanning && !_dialog) {
-+            for(size_t i=0;i<s.ap_count;i++)if(s.aps[i].frequency>5000 && !strcmp(s.aps[i].ssid,selectRequested)){select(i);selectRequested[0]=0;break;}
++        // Keep row indices tied to an immutable completed scan, including while
++        // a new scan adds individual BSSIDs. A row always selects the AP it shows.
++        if(s.scanning)return;
++        bool rebuild=_generation!=s.scan_generation || _count!=s.ap_count;
++        if(rebuild) {
++            size_t count=ax900_get_scan_results(_scanResults.get(),AX900_MAX_APS,&_generation);
++            _count=count;
++            _networkCount=ax900_group_networks(_scanResults.get(),count,_networks.get(),AX900_MAX_APS);
 +        }
-+        if(_generation==s.scan_generation && _count==s.ap_count)return;
-+        _generation=s.scan_generation;_count=s.ap_count;
++        if(selectRequested[0] && !_dialog) {
++            for(size_t i=0;i<_networkCount;i++)if(!strcmp(_networks[i].preferred.ssid,selectRequested)){
++                select(i);selectRequested[0]=0;break;
++            }
++        }
++        if(!rebuild)return;
 +        lv_obj_clean(_list->get());
 +
-+        for(size_t i=0;i<s.ap_count;i++) {
-+            auto &ap=s.aps[i];unsigned ch=ap.frequency>5000?(ap.frequency-5000)/5:(ap.frequency-2407)/5;
++        for(size_t i=0;i<_networkCount;i++) {
++            const auto &network=_networks[i];const auto &ap=network.preferred;
 +            auto *row=lv_obj_create(_list->get());lv_obj_set_size(row,LV_PCT(100),58);
 +            lv_obj_remove_flag(row,LV_OBJ_FLAG_SCROLLABLE);
 +            lv_group_add_obj(_group,row);
@@ -335,11 +408,13 @@ new file mode 100644
 +            lv_obj_set_style_bg_color(row,lv_color_hex(ap.frequency>5000?0x183D42:0x20303A),0);
 +            lv_obj_set_style_border_width(row,0,0);
 +            auto *name=lv_label_create(row);lv_obj_align(name,LV_ALIGN_LEFT_MID,0,0);
-+            lv_obj_set_width(name,560);lv_label_set_long_mode(name,LV_LABEL_LONG_DOT);
++            lv_obj_set_width(name,440);lv_label_set_long_mode(name,LV_LABEL_LONG_DOT);
 +            lv_obj_set_style_text_font(name,&lv_font_montserrat_20,0);
 +            lv_label_set_text(name,ap.ssid[0]?ap.ssid:"(hidden network)");
 +            auto *detail=lv_label_create(row);lv_obj_align(detail,LV_ALIGN_RIGHT_MID,0,0);
-+            lv_label_set_text_fmt(detail,"%s   CH %u   %d dBm",ap.frequency>5000?"5 GHz":"2.4 GHz",ch,ap.rssi);
++            const char *security=!ap.secured?"Open":ap.enterprise?"Enterprise":ap.sae?"WPA3 / SAE":"WPA2";
++            const char *bands=network.band_5?(network.band_24?"2.4 + 5 GHz":"5 GHz"):"2.4 GHz";
++            lv_label_set_text_fmt(detail,"%s  |  %s  |  %u AP  |  %d dBm",security,bands,network.access_points,ap.rssi);
 +        }
 +        if(!s.ap_count) {
 +            auto *empty=lv_label_create(_list->get());
@@ -373,23 +448,34 @@ diff --git a/app/apps/app_launcher/view/ax900_test_view.h b/app/apps/app_launche
 new file mode 100644
 --- /dev/null
 +++ b/app/apps/app_launcher/view/ax900_test_view.h
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,31 @@
 +// SPDX-License-Identifier: MIT
 +#pragma once
 +#ifdef ESP_PLATFORM
 +#include <lvgl.h>
 +#include <ax900.h>
 +#include <ax900_probe.h>
++#include <ax900_test.h>
 +
 +class Ax900TestView {
 +public:
 +    explicit Ax900TestView(lv_obj_t *parent);
 +    ~Ax900TestView();
 +    void show(bool visible);
-+    void update(const ax900_status_t &link);
++    void update(const ax900_link_status_t &link);
 +    void run();
++    void addToGroup(lv_group_t *group);
++    bool settingsOpen() const {return _settings!=nullptr;}
 +    lv_obj_t *runButton() const {return _button;}
 +private:
++    void configure();
++    void closeSettings();
++    void start();
++    ax900_test_config_t _config={};
++    esp_err_t _startError=ESP_OK;
++    bool _targetChanged=false;
++    lv_obj_t *_mode=nullptr,*_configure=nullptr,*_settings=nullptr,*_fields[4]={};
++    lv_group_t *_settingsGroup=nullptr,*_previousGroup=nullptr;
 +    lv_obj_t *_root,*_ssid,*_band,*_steps[4],*_stepDots[4],*_traffic;
 +    lv_obj_t *_addresses[4],*_button,*_buttonLabel,*_headline,*_summary,*_progress,*_samples[AX900_PROBE_COUNT];
 +};
@@ -398,12 +484,16 @@ diff --git a/app/apps/app_launcher/view/ax900_test_view.cpp b/app/apps/app_launc
 new file mode 100644
 --- /dev/null
 +++ b/app/apps/app_launcher/view/ax900_test_view.cpp
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,220 @@
 +// SPDX-License-Identifier: MIT
 +#ifdef ESP_PLATFORM
 +#include "ax900_test_view.h"
 +#include <esp_netif.h>
 +#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <ax900_metrics.h>
++#include <hal/components/tab5_keyboard.h>
 +
 +namespace {
 +constexpr uint32_t ink=0xEEF5F6, muted=0x8FA7B4, green=0x69D9AE, amber=0xF4C577;
@@ -445,33 +535,90 @@ new file mode 100644
 +        _addresses[i]=label(addresses,"--",x,y+25,&lv_font_montserrat_24,ink);
 +    }
 +    auto *ping=box(_root,366,200,706,260,0x101E27);
-+    label(ping,"GATEWAY TEST",22,20,&lv_font_montserrat_14,muted);
-+    _headline=label(ping,"Ready when connected",22,50,&lv_font_montserrat_24,ink);
-+    _summary=label(ping,"5 requests  /  latency and packet loss",22,88,&lv_font_montserrat_16,muted);
++    label(ping,"TEST",22,26,&lv_font_montserrat_14,muted);
++    _mode=lv_dropdown_create(ping);lv_obj_set_pos(_mode,80,16);lv_obj_set_size(_mode,275,50);
++    lv_dropdown_set_options(_mode,"Gateway ping\nDNS lookup\nTCP connect\nHTTP response\nTCP upload\nTCP download\nUDP round trip");
++    _configure=lv_button_create(ping);lv_obj_set_pos(_configure,365,18);lv_obj_set_size(_configure,142,50);
++    auto *target=lv_label_create(_configure);lv_label_set_text(target,"Target");lv_obj_center(target);
++    lv_obj_add_event_cb(_configure,[](lv_event_t *e){static_cast<Ax900TestView *>(lv_event_get_user_data(e))->configure();},LV_EVENT_CLICKED,this);
++    _config.port=5201;_config.timeout_ms=30000;_config.bytes=1048576;snprintf(_config.path,sizeof(_config.path),"/health");
++    _headline=label(ping,"Ready when connected",22,76,&lv_font_montserrat_24,ink);
++    _summary=label(ping,"5 requests  /  latency and packet loss",22,108,&lv_font_montserrat_16,muted);
++    lv_obj_set_width(_summary,662);lv_label_set_long_mode(_summary,LV_LABEL_LONG_WRAP);
++    lv_obj_set_width(_headline,662);lv_label_set_long_mode(_headline,LV_LABEL_LONG_DOT);
 +    _button=lv_button_create(ping);lv_obj_set_pos(_button,518,18);lv_obj_set_size(_button,166,54);
 +    lv_obj_set_style_bg_color(_button,lv_color_hex(0x69D9AE),0);lv_obj_set_style_radius(_button,14,0);
 +    _buttonLabel=label(_button,"Run test",0,0,&lv_font_montserrat_18,0x102821);lv_obj_center(_buttonLabel);
 +    lv_obj_add_event_cb(_button,[](lv_event_t *e){
-+        ax900_probe_start();
-+    },LV_EVENT_CLICKED,nullptr);
++        static_cast<Ax900TestView *>(lv_event_get_user_data(e))->start();
++    },LV_EVENT_CLICKED,this);
 +    for(unsigned i=0;i<AX900_PROBE_COUNT;i++) {
-+        auto *cell=box(ping,22+i*136,128,118,52,0x203340);
++        auto *cell=box(ping,22+i*136,146,118,40,0x203340);
 +        _samples[i]=label(cell,"--",0,0,&lv_font_montserrat_18,muted);lv_obj_center(_samples[i]);
 +    }
 +    _progress=lv_bar_create(ping);lv_obj_set_pos(_progress,22,194);lv_obj_set_size(_progress,662,5);
 +    lv_bar_set_range(_progress,0,AX900_PROBE_COUNT);
 +    lv_obj_set_style_bg_color(_progress,lv_color_hex(0x243B49),LV_PART_MAIN);
 +    lv_obj_set_style_bg_color(_progress,lv_color_hex(green),LV_PART_INDICATOR);
-+    label(ping,"Local gateway only. Internet access is not tested.",22,219,&lv_font_montserrat_14,muted);
++    label(ping,"Targets are local settings. Throughput needs the LAN test peer.",22,219,&lv_font_montserrat_14,muted);
 +}
-+Ax900TestView::~Ax900TestView(){lv_obj_delete(_root);}
++Ax900TestView::~Ax900TestView(){closeSettings();lv_obj_delete(_root);}
 +void Ax900TestView::show(bool visible){
 +    if(visible)lv_obj_remove_flag(_root,LV_OBJ_FLAG_HIDDEN);else lv_obj_add_flag(_root,LV_OBJ_FLAG_HIDDEN);
 +}
++void Ax900TestView::addToGroup(lv_group_t *group){lv_group_add_obj(group,_mode);lv_group_add_obj(group,_configure);lv_group_add_obj(group,_button);}
 +void Ax900TestView::run(){
 +    if(!lv_obj_has_state(_button,LV_STATE_DISABLED))lv_obj_send_event(_button,LV_EVENT_CLICKED,nullptr);
 +}
-+void Ax900TestView::update(const ax900_status_t &s) {
++void Ax900TestView::start(){
++    unsigned mode=lv_dropdown_get_selected(_mode);
++    ax900_test_result_t result;ax900_test_get_result(&result);
++    if(result.state==AX900_TEST_RUNNING){ax900_test_cancel();return;}
++    _config.kind=static_cast<ax900_test_kind_t>(mode?mode-1:0);
++    _startError=mode?ax900_test_start(&_config):ax900_probe_start();
++    if(_startError==ESP_OK)_targetChanged=false;
++}
++void Ax900TestView::closeSettings(){
++    if(_settingsGroup){tab5_keyboard_set_group(_previousGroup);lv_group_delete(_settingsGroup);_settingsGroup=nullptr;}
++    if(_settings){lv_obj_delete(_settings);_settings=nullptr;}
++}
++void Ax900TestView::configure(){
++    if(_settings)return;
++    _settings=lv_obj_create(lv_screen_active());lv_obj_set_size(_settings,1080,640);lv_obj_center(_settings);
++    lv_obj_set_style_bg_color(_settings,lv_color_hex(0x18242B),0);
++    label(_settings,"Connection test target",20,10,&lv_font_montserrat_24,ink);
++    label(_settings,"DNS uses port 53. Upload / download / UDP use the local test peer.",20,45,&lv_font_montserrat_16,muted);
++    const char *names[]={"Host name or IPv4","Port","DNS IPv4 (blank = DHCP)","HTTP path"};
++    char port[8];snprintf(port,sizeof(port),"%u",_config.port);
++    const char *values[]={_config.host,port,_config.dns_ipv4,_config.path};
++    _previousGroup=lv_obj_get_group(_button);_settingsGroup=lv_group_create();tab5_keyboard_set_group(_settingsGroup);
++    auto *keyboard=lv_keyboard_create(_settings);lv_obj_set_size(keyboard,1030,285);lv_obj_align(keyboard,LV_ALIGN_BOTTOM_MID,0,-5);
++    for(unsigned i=0;i<4;i++){
++        int x=20+(i%2)*515,y=78+(i/2)*86;
++        label(_settings,names[i],x,y,&lv_font_montserrat_14,muted);
++        _fields[i]=lv_textarea_create(_settings);lv_obj_set_pos(_fields[i],x,y+22);lv_obj_set_size(_fields[i],495,52);
++        lv_textarea_set_one_line(_fields[i],true);lv_textarea_set_max_length(_fields[i],i==0?253:i==1?5:i==2?15:127);
++        lv_textarea_set_text(_fields[i],values[i]);lv_group_add_obj(_settingsGroup,_fields[i]);
++        lv_obj_add_event_cb(_fields[i],[](lv_event_t *e){lv_keyboard_set_textarea(static_cast<lv_obj_t *>(lv_event_get_user_data(e)),static_cast<lv_obj_t *>(lv_event_get_target(e)));},LV_EVENT_FOCUSED,keyboard);
++    }
++    lv_keyboard_set_textarea(keyboard,_fields[0]);
++    auto *save=lv_button_create(_settings);lv_obj_set_pos(save,860,260);lv_obj_set_size(save,165,48);
++    auto *text=lv_label_create(save);lv_label_set_text(text,"Use target");lv_obj_center(text);
++    lv_obj_add_event_cb(save,[](lv_event_t *e){auto *self=static_cast<Ax900TestView *>(lv_event_get_user_data(e));
++        unsigned long port=strtoul(lv_textarea_get_text(self->_fields[1]),nullptr,10);
++        if(!port || port>65535){lv_textarea_set_text(self->_fields[1],"5201");return;}
++        snprintf(self->_config.host,sizeof(self->_config.host),"%s",lv_textarea_get_text(self->_fields[0]));
++        self->_config.port=port;
++        snprintf(self->_config.dns_ipv4,sizeof(self->_config.dns_ipv4),"%s",lv_textarea_get_text(self->_fields[2]));
++        snprintf(self->_config.path,sizeof(self->_config.path),"%s",lv_textarea_get_text(self->_fields[3]));
++        self->_startError=ESP_OK;self->_targetChanged=true;self->closeSettings();
++    },LV_EVENT_CLICKED,this);lv_group_add_obj(_settingsGroup,save);
++    auto *cancel=lv_button_create(_settings);lv_obj_set_pos(cancel,680,260);lv_obj_set_size(cancel,165,48);
++    text=lv_label_create(cancel);lv_label_set_text(text,"Cancel");lv_obj_center(text);
++    lv_obj_add_event_cb(cancel,[](lv_event_t *e){static_cast<Ax900TestView *>(lv_event_get_user_data(e))->closeSettings();},LV_EVENT_CLICKED,this);lv_group_add_obj(_settingsGroup,cancel);
++    lv_group_focus_obj(_fields[0]);
++}
++void Ax900TestView::update(const ax900_link_status_t &s) {
 +    bool active=s.connecting || s.associated;
 +    lv_label_set_text(_ssid,active && s.connected_ssid[0]?s.connected_ssid:"No network");
 +    if(active && s.connected_frequency) {
@@ -487,18 +634,47 @@ new file mode 100644
 +        lv_obj_set_style_bg_color(_stepDots[i],lv_color_hex(complete[i]?green:busy?amber:0x344A58),0);
 +    }
 +    lv_label_set_text_fmt(_traffic,"TX %lu     RX %lu",(unsigned long)s.tx_packets,(unsigned long)s.rx_packets);
-+    esp_netif_t *netif=esp_netif_get_handle_from_ifkey("AX900");
-+    esp_netif_ip_info_t info={};esp_netif_dns_info_t dns={};
-+    bool has_ip=s.has_ip && netif && esp_netif_get_ip_info(netif,&info)==ESP_OK;
++    ax900_ipv4_info_t info={};
++    bool has_ip=s.has_ip && ax900_get_ipv4_info(&info);
 +    if(has_ip) {
-+        lv_label_set_text_fmt(_addresses[0],IPSTR,IP2STR(&info.ip));
-+        lv_label_set_text_fmt(_addresses[1],IPSTR,IP2STR(&info.gw));
-+        lv_label_set_text_fmt(_addresses[2],IPSTR,IP2STR(&info.netmask));
-+        if(esp_netif_get_dns_info(netif,ESP_NETIF_DNS_MAIN,&dns)==ESP_OK && dns.ip.type==ESP_IPADDR_TYPE_V4 && dns.ip.u_addr.ip4.addr)
-+            lv_label_set_text_fmt(_addresses[3],IPSTR,IP2STR(&dns.ip.u_addr.ip4));
-+        else lv_label_set_text(_addresses[3],"Not provided");
++        lv_label_set_text(_addresses[0],info.ip);
++        lv_label_set_text(_addresses[1],info.gateway);
++        lv_label_set_text(_addresses[2],info.netmask);
++        lv_label_set_text(_addresses[3],info.dns[0]?info.dns:"Not provided");
 +    } else for(auto *field:_addresses)lv_label_set_text(field,"--");
 +
++    ax900_metrics_t metrics;ax900_get_metrics(&metrics);
++    lv_obj_set_style_text_font(_traffic,&lv_font_montserrat_14,0);
++    lv_label_set_text_fmt(_traffic,"TX %lu  RX %lu  Drop %lu\nPool %llu / peak %llu  TX fail %llu",
++        (unsigned long)s.tx_packets,(unsigned long)s.rx_packets,(unsigned long)s.rx_dropped,
++        metrics.value[AX900_POOL_USED],metrics.value[AX900_POOL_PEAK],metrics.value[AX900_TX_USB_FAILED]);
++    if(lv_dropdown_get_selected(_mode)){
++        ax900_test_result_t t;ax900_test_get_result(&t);
++        if(t.state!=AX900_TEST_RUNNING && (_targetChanged || t.kind!=lv_dropdown_get_selected(_mode)-1))t={};
++        bool running=t.state==AX900_TEST_RUNNING;
++        if(has_ip)lv_obj_remove_state(_button,LV_STATE_DISABLED);else lv_obj_add_state(_button,LV_STATE_DISABLED);
++        lv_label_set_text(_buttonLabel,running?"Cancel":"Run test");
++        if(running){lv_obj_add_state(_mode,LV_STATE_DISABLED);lv_obj_add_state(_configure,LV_STATE_DISABLED);}
++        else{lv_obj_remove_state(_mode,LV_STATE_DISABLED);lv_obj_remove_state(_configure,LV_STATE_DISABLED);}
++        const char *states[]={"Choose a target and run","Testing...","Test passed","Test failed","Cancelled","Connection changed"};
++        lv_label_set_text(_headline,_startError?esp_err_to_name(_startError):!has_ip?"Connect to Wi-Fi first":states[t.state]);
++        const char *stages[]={"ready","interface","DNS","socket","connect","transfer","response"};
++        if(t.state==AX900_TEST_PASSED || t.state==AX900_TEST_FAILED)
++            lv_label_set_text_fmt(_summary,"%s | %lu ms | %lu kbps | UDP %lu / %lu\nHTTP %d | errors %d / %d",
++                stages[t.stage],(unsigned long)t.elapsed_ms,(unsigned long)t.kilobits_per_second,(unsigned long)t.received,
++                (unsigned long)t.sent,t.http_status,t.error,t.socket_error);
++        else lv_label_set_text(_summary,_config.host[0]?_config.host:"Set a host, port and optional DNS server using Target.");
++        for(auto *sample:_samples)lv_label_set_text(sample,"--");
++        if(t.state>=AX900_TEST_PASSED){
++            lv_label_set_text_fmt(_samples[0],"%lu KB",(unsigned long)(t.bytes/1024));
++            lv_label_set_text_fmt(_samples[1],"%lu kbps",(unsigned long)t.kilobits_per_second);
++            lv_label_set_text_fmt(_samples[2],"%lu ms",(unsigned long)t.average_ms);
++            lv_label_set_text_fmt(_samples[3],"%lu KB",(unsigned long)(t.internal_after/1024));
++            lv_label_set_text_fmt(_samples[4],"%lu KB min",(unsigned long)(t.internal_minimum/1024));
++        }
++        lv_bar_set_value(_progress,t.state==AX900_TEST_PASSED?AX900_PROBE_COUNT:0,LV_ANIM_OFF);return;
++    }
++    lv_obj_remove_state(_mode,LV_STATE_DISABLED);lv_obj_remove_state(_configure,LV_STATE_DISABLED);
 +    ax900_probe_result_t p;ax900_probe_get_result(&p);
 +    bool running=p.state==AX900_PROBE_RUNNING,stale=p.state==AX900_PROBE_STALE;
 +    if(has_ip && !running)lv_obj_remove_state(_button,LV_STATE_DISABLED);
@@ -533,12 +709,14 @@ diff --git a/platforms/tab5/main/ax900_console.cpp b/platforms/tab5/main/ax900_c
 new file mode 100644
 --- /dev/null
 +++ b/platforms/tab5/main/ax900_console.cpp
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,134 @@
 +// SPDX-License-Identifier: MIT
 +// Local USB diagnostic commands for repeatable hardware and display verification.
 +#include <ax900.h>
 +#include <ax900_probe.h>
++#include <ax900_test.h>
 +#include <ax900_diagnostics.h>
++#include <ax900_metrics.h>
 +#include <esp_heap_caps.h>
 +#include <hal/hal.h>
 +#include <lvgl.h>
@@ -587,7 +765,7 @@ new file mode 100644
 +    printf("AXSNAP END\n");lv_draw_buf_destroy(buffer);
 +}
 +void ax900_console_poll() {
-+    static char command[48];static size_t used=0;
++    static char command[384];static size_t used=0;
 +    // The default USB Serial/JTAG VFS uses non-blocking hardware reads already.
 +    // O_NONBLOCK would skip its one-byte prefetch when no ring-buffer driver exists.
 +    char input[64];ssize_t n=read(STDIN_FILENO,input,sizeof(input));
@@ -595,6 +773,16 @@ new file mode 100644
 +        if(input[i]=='\n' || input[i]=='\r') {
 +            command[used]=0;used=0;
 +            if(!strcmp(command,"ax900 scan"))printf("AX900_SCAN_REQUEST %d\n",ax900_request_scan());
++            else if(!strcmp(command,"ax900 start"))printf("AX900_START %d\n",ax900_start());
++            else if(!strcmp(command,"ax900 stop"))printf("AX900_STOP %d\n",ax900_stop());
++            else if(!strncmp(command,"ax900 saved ",12)) {
++                auto s=std::make_unique<ax900_status_t>();ax900_get_status(s.get());
++                const ax900_ap_t *best=nullptr;
++                for(size_t j=0;j<s->ap_count;j++)if(!strcmp(s->aps[j].ssid,command+12) && ax900_has_saved(&s->aps[j]) &&
++                    (!best || (s->aps[j].frequency>5000 && best->frequency<=5000) ||
++                     ((s->aps[j].frequency>5000)==(best->frequency>5000) && s->aps[j].rssi>best->rssi)))best=&s->aps[j];
++                printf("AX900_SAVED_CONNECT %d\n",best?ax900_connect_saved(best):ESP_ERR_NOT_FOUND);
++            }
 +            else if(!strcmp(command,"ax900 open"))ax900_ui_request_open();
 +            else if(!strncmp(command,"ax900 select ",13))ax900_ui_request_select(command+13);
 +            else if(!strncmp(command,"ax900 associate ",16)) {
@@ -605,6 +793,21 @@ new file mode 100644
 +                else frequency=0;
 +                for(size_t j=0;j<s->ap_count;j++)if(!strcmp(s->aps[j].ssid,ssid) && s->aps[j].frequency>5000 && (!frequency || s->aps[j].frequency==frequency) && (!best || s->aps[j].rssi>best->rssi))best=&s->aps[j];
 +                printf("AX900_ASSOCIATE_TEST %d\n",best?ax900_test_association(best):ESP_ERR_NOT_FOUND);
++            }
++            else if(!strncmp(command,"ax900 check ",12)) {
++                ax900_test_config_t c={};unsigned kind=0,port=0;char extra=0;
++                int fields=sscanf(command+12,"%u %253s %u %15s %c",&kind,c.host,&port,c.dns_ipv4,&extra);
++                c.kind=static_cast<ax900_test_kind_t>(kind);c.port=port;c.timeout_ms=30000;c.bytes=1048576;
++                snprintf(c.path,sizeof(c.path),"/health");
++                printf("AX900_CHECK_START %d\n",(fields==3 || fields==4) && port>0 && port<=65535?ax900_test_start(&c):ESP_ERR_INVALID_ARG);
++            }
++            else if(!strcmp(command,"ax900 check-cancel"))ax900_test_cancel();
++            else if(!strcmp(command,"ax900 check-status")) {
++                ax900_test_result_t t;ax900_test_get_result(&t);
++                printf("AX900_CHECK state=%u kind=%u stage=%u error=%d socket_error=%d http=%d elapsed_ms=%lu bytes=%lu kbps=%lu sent=%lu received=%lu avg_ms=%lu internal_before=%lu internal_after=%lu internal_min=%lu\n",
++                    t.state,t.kind,t.stage,t.error,t.socket_error,t.http_status,(unsigned long)t.elapsed_ms,(unsigned long)t.bytes,
++                    (unsigned long)t.kilobits_per_second,(unsigned long)t.sent,(unsigned long)t.received,(unsigned long)t.average_ms,
++                    (unsigned long)t.internal_before,(unsigned long)t.internal_after,(unsigned long)t.internal_minimum);
 +            }
 +            else if(!strcmp(command,"ax900 probe"))printf("AX900_PROBE_START %d\n",ax900_probe_start());
 +            else if(!strcmp(command,"ax900 test"))ax900_ui_request_test(false);
@@ -628,6 +831,11 @@ new file mode 100644
 +                    static_cast<unsigned long>(s->tx_packets),static_cast<unsigned long>(s->rx_packets),
 +                    static_cast<unsigned long>(s->rx_dropped),s->disconnect_reason);
 +                printf("AX900_SAVED count=%u current=%u error=%d\n",s->saved_networks,s->credentials_saved,s->profile_error);
++                printf("AX900_RUNTIME lifecycle=%u frequency=%u connection_id=%lu\n",ax900_get_lifecycle(),s->connected_frequency,(unsigned long)s->connection_id);
++                ax900_metrics_t m;ax900_get_metrics(&m);
++                printf("AX900_METRICS pool=%llu pool_peak=%llu tx_full=%llu tx_empty=%llu tx_failed=%llu rx_full=%llu rx_empty=%llu inflight=%llu\n",
++                    m.value[AX900_POOL_USED],m.value[AX900_POOL_PEAK],m.value[AX900_TX_QUEUE_FULL],m.value[AX900_TX_POOL_EMPTY],
++                    m.value[AX900_TX_USB_FAILED],m.value[AX900_RX_QUEUE_FULL],m.value[AX900_RX_POOL_EMPTY],m.value[AX900_USB_INFLIGHT]);
 +                printf("AX900_RECOVERY enabled=%u pending=%u attempts=%u in_ms=%lu usb_errors=%lu usb_recoveries=%lu error=%d heap=%u internal=%u\n",
 +                    s->reconnect_enabled,s->reconnect_pending,s->reconnect_attempts,(unsigned long)s->reconnect_in_ms,
 +                    (unsigned long)s->usb_errors,(unsigned long)s->usb_recoveries,s->transport_error,

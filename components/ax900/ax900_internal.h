@@ -1,10 +1,19 @@
 #pragma once
 #include "ax900.h"
+#include "ax900_radio.h"
 #include "usb/usb_host.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
+#define AX_DATA_SLOTS 4
+struct ax_usb_data {
+    usb_transfer_t *transfer;
+    struct ax900_device *owner;
+    bool pending;
+    size_t bytes;
+    int64_t submitted;
+};
 typedef struct ax900_device {
     usb_device_handle_t usb;
     usb_transfer_t *rx;
@@ -14,6 +23,7 @@ typedef struct ax900_device {
     uint8_t address;
     int64_t drain_started;
     struct ax_usb_wait *tx;
+    struct ax_usb_data data[AX_DATA_SLOTS];
     uint8_t scan_result;
     esp_err_t reply_error;
     uint16_t waiting_id;
@@ -39,10 +49,15 @@ esp_err_t ax_scan(ax900_device_t *d);
 void ax_message(ax900_device_t *d,uint16_t id,const uint8_t *p,size_t n);
 void ax_status(const char *text);
 void ax_set_ready(bool supports_5ghz);
+void ax_radio_report(uint32_t version,uint32_t features);
 void ax_pump(unsigned ms);
 esp_err_t ax_data_tx(ax900_device_t *d, const uint8_t *frame, size_t length);
+esp_err_t ax_data_quiesce(ax900_device_t *d);
+bool ax_data_tx_available(ax900_device_t *d);
+esp_err_t ax_data_tx_async(ax900_device_t *d,const uint8_t *frame,size_t length);
 esp_err_t ax_net_init(ax900_device_t *d);
 void ax_net_stop(ax900_device_t *d);
+esp_err_t ax_net_deinit(void);
 void ax_net_poll(ax900_device_t *d);
 void ax_net_receive(void *arg, const uint8_t *record, size_t length);
 #include "ax900_credentials.h"
@@ -59,3 +74,4 @@ void ax_net_debug_dhcp_timeout(void);
 // Called only by the USB/network worker, never from a supplicant callback.
 void ax_reconnect_lost(bool authentication_failure);
 void ax_supplicant_poll(void);
+void ax_supplicant_reset(void);

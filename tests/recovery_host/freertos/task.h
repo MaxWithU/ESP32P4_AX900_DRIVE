@@ -5,3 +5,5 @@
 static inline int xTaskCreate(void (*fn)(void *),const char *name,unsigned stack,void *arg,unsigned priority,void *handle) {
     (void)fn;(void)name;(void)stack;(void)arg;(void)priority;(void)handle;return pdPASS;
 }
+
+static inline void vTaskDelete(void *p){(void)p;}

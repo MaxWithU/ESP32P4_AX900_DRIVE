@@ -2,17 +2,17 @@
 
 面向 ESP-IDF 的 AX900 USB Wi-Fi 驱动移植，已在 **M5Stack Tab5 / ESP32-P4** 上验证双频扫描和 5 GHz 企业网络连接。
 
-**实机已通过 5 GHz PEAP/MSCHAPv2 认证、WPA2 密钥协商、AX900 DHCP 获取及网关 ICMP 通信验证，实体键盘输入、Wi-Fi 配置记忆和重启自动重连也已实机通过。三轮共 9 次受控故障恢复均重新获得 DHCP，恢复后网关 Ping 为 43/45；USB 恢复约 8 秒，手动断开保持离线通过。驱动仍处于实验阶段，互联网访问、长期稳定性和吞吐尚未验证。**
+**实机已通过 5 GHz PEAP/MSCHAPv2 认证、WPA2 密钥协商、AX900 DHCP 获取及网关 ICMP 通信验证，实体键盘输入、Wi-Fi 配置记忆和重启自动重连也已实机通过。三轮共 9 次受控故障恢复均重新获得 DHCP，恢复后网关 Ping 为 43/45；USB 恢复约 8 秒，手动断开保持离线通过。另已验证 5 GHz WPA2-Personal 热点的四次握手、DHCP、配置保存和网关 5/5 回复。驱动仍处于实验阶段，长期稳定性与兼容性覆盖尚未完成。**
 
 ## 已实现与验证
 
 - USB 模式切换：`a69c:5721` 存储模式 → `a69c:8d80` 固件加载 → `a69c:8d81` 无线运行。
 - 固件上传、补丁表加载、射频初始化、双频被动扫描和重复扫描。
 - 网卡未烧录有效 MAC 时，基于 ESP32-P4 硬件地址派生稳定的本地单播地址；不写入网卡 eFuse。连接前在选定信道定向探测目标 AP。
-- 最多缓存 64 个 BSSID，提供 SSID、频率、RSSI 和加密标志。
+- 最多缓存 64 个 BSSID；界面按原始 SSID 和安全策略合并重复 Wi-Fi，显示频段、AP 数和 RSSI，优先选择 5 GHz。隐藏网络及不同认证策略保持独立。
 - 官方 M5Tab5 UserDemo 接入补丁：5 GHz 优先列表、密码/企业账号输入、连接/断开和 USB 串口诊断。
 - Tab5Keyboard 实体键盘：I²C 0x6D、Aa / Sym、字母数字符号、退格、Tab 焦点切换、方向键和 Enter 操作。
-- 成功联网后记忆最多 4 个网络，启动和意外掉线自动重连；提供使用已存账号连接及清除记录按钮。
+- 成功联网后记忆最多 4 个网络，启动和意外掉线自动重连；支持逐个删除和自动连接开关。可从 SD 导入企业 CA，保护加密存储为需提前配置的可选项。
 - **Connection test** 面板：USB / 关联 / 认证 / DHCP 状态、IP / 网关 / 子网掩码 / DNS、收发计数及 5 次网关 Ping 的逐次延迟、平均延迟和丢包率。
 - 上游 Hostap WPA2/EAP 状态机、mbedTLS PEAP TLS 1.2 桥接、USB 数据队列及独立 AX900 `esp_netif`。
 - 在 5260 MHz（信道 52）完成 PEAP/MSCHAPv2 认证、单播/组播密钥安装及独立 AX900 接口 DHCP 获取；通过绑定该接口的 ICMP 请求收到网关回复。
@@ -58,12 +58,12 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 // 在 USB Host 和板级供电准备好后调用一次。
 ESP_ERROR_CHECK(ax900_start());
 
-// 状态结构约 22 KB，建议使用静态或堆存储。
-static ax900_status_t status;
-ax900_get_status(&status);
+// 周期轮询使用紧凑快照，扫描完成后再单独读取 AP 列表。
+ax900_link_status_t status;
+ax900_get_link_status(&status);
 if (status.ready && !status.scanning) {
     esp_err_t result = ax900_request_scan();
-    // result == ESP_OK 表示请求已排队；完成后读取 scan_generation / aps。
+    // result == ESP_OK 表示请求已排队；完成后使用 ax900_get_scan_results() 读取扫描结果。
 }
 ```
 
@@ -88,14 +88,14 @@ esp_err_t result = ax900_connect_peap(&ap, &config);
 字符串会复制到驱动 RAM；认证并获得 DHCP 地址后，在设备 `ax900_wifi` NVS 命名空间保存最多 4 个网络的账号、密码和证书策略。失败尝试不会覆盖已保存配置，诊断关联不保存；断开后清除 RAM 中的连接请求。启动扫描后优先重连最近成功的网络，同名网络优先选 5 GHz。手动断开后保持断开；临时故障有限退避重试，认证失败暂停自动尝试。CA 校验还要求设备有正确时间。
 
 `ax900_connect_saved(&ap)` 使用已保存配置连接，`ax900_has_saved(&ap)` 只返回是否已保存，`ax900_forget_saved()` 清除 AX900 保存记录。没有导出密码的接口。官方 NVS 默认未启用 Flash/NVS 加密，因此记录是设备本地持久存储，并非加密保险库；日志、快照和 Git 均不记录凭据。
-若用户明确选择不校验服务器，省略 CA/域名并显式设置 `allow_unverified_server=true`；这种模式无法验证服务器身份，账号信息可能被冒充热点窃取。官方示例窗口提供有明确标记的“不校验证书”选项；使用 CA/域名的应用需通过 API 提供配置。
+若用户明确选择不校验服务器，省略 CA/域名并显式设置 `allow_unverified_server=true`；这种模式无法验证服务器身份，账号信息可能被冒充热点窃取。官方示例窗口提供有明确标记的“不校验证书”选项；界面支持 SD 卡 `/sd/` 下的 PEM CA 文件（最多 8192 字节）和服务器 DNS 名；API 同样支持。
 
 当前限制：CCMP、TLS 1.2，不支持 WPA3、TKIP、强制 PMF、EAP-TLS、自动漫游/预认证或密码变更。扫描期间不能连接，连接期间须先断开才能扫描。
-上游认证核心尚未统一加符号前缀，当前配置关闭内置 Espressif Wi-Fi supplicant；不要同时链接另一套 Hostap 符号。
+上游认证核心已统一使用组件私有符号前缀，`tools/supplicant_symbols.py --check` 可检查构建产物是否遗漏隔离。官方内置 Wi-Fi 并行传输场景仍需单独实测。
 
 `associated` 仅表示无线关联；`authenticated` 表示 WPA2 密钥安装/控制端口开放；只有 `has_ip` 才表示 AX900 获得 DHCP 地址。官方演示中另一个 Wi-Fi AP 的 `192.168.4.1` 不能作为 AX900 已联网的证据。
 `ax900 associate` 只测试无线关联，不发送用户名或密码，不开放数据端口，成功后 10 秒自动断开。
-`ax900 probe` 与界面 **Run test** 使用同一个异步测试模块，通过 AX900 接口向 DHCP 网关发送 5 次 ICMP 请求。测试期间禁止重复启动；断开或重连后旧结果标记为过期。网关 Ping 只验证局域网可达性。官方图形固件通过 `xTaskCreateWithCaps()` 将 Ping 任务栈放入 PSRAM，避免显示和 PEAP 占用内部 RAM 后创建任务失败；仍使用所选 ESP-IDF 自带 ICMP 实现。
+`ax900 probe` 与界面 **Run test** 使用同一个异步测试模块，通过 AX900 接口向 DHCP 网关发送 5 次 ICMP 请求。测试期间禁止重复启动；断开或重连后旧结果标记为过期。网关 Ping 只验证局域网可达性。官方图形固件通过 `xTaskCreateWithCaps()` 将 Ping 任务栈放入 PSRAM，避免显示和 PEAP 占用内部 RAM 后创建任务失败；使用仓库内固定到 ESP-IDF 5.5.2 的 ICMP socket 实现，不再包含 SDK 私有源文件。
 
 ## 断线与 USB 恢复
 
@@ -129,6 +129,12 @@ ax900 open
 ax900 select <SSID>
 ax900 associate [frequency_MHz] <SSID>
 ax900 disconnect
+ax900 saved <SSID>
+ax900 stop
+ax900 start
+ax900 check <kind:0..5> <host> <port> [DNS_IP]
+ax900 check-status
+ax900 check-cancel
 ax900 probe
 ax900 test
 ax900 test-run
@@ -152,13 +158,23 @@ macOS 重开 CDC 串口可能使设备复位；脚本默认等待 16 秒以避�
 
 ## 主机测试
 
+统一执行本地 ASan/UBSan 回归（无需设备、无日志上传）：
+
+```sh
+python3 tools/test_local.py \
+  --official ../Tab5/M5Tab5-UserDemo \
+  --mbedtls "$IDF_PATH/components/mbedtls/mbedtls"
+```
+
+测试覆盖扫描分组、DNS、国家信道、包池、配置及受保护存储、测试 API、USB 生命周期、实体键盘、TLS 与真实 Hostap WPA2 握手；缺少可选依赖会明确显示 SKIP。独立固件和官方固件构建仍须分别执行。新增 API、性能测试步骤及验证边界见 [开发与测试说明](docs/driver-development.md)。
+
 恢复测试直接编译生产 USB 工作任务，模拟 USB 主机的传输所有权，覆盖迟到回调、取消不归还、RX 错误/提交失败、初始化清理、重试上限、网络选择和用户取消：
 
 ```sh
 cc -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-misleading-indentation \
   -fsanitize=address,undefined -I tests/recovery_host -I tests/profile_host \
   -I tests/probe_host -I components/ax900/include -I components/ax900 \
-  tests/recovery_test.c -o /tmp/ax900-recovery-test
+  tests/recovery_test.c components/ax900/ax900_metrics.c -o /tmp/ax900-recovery-test
 /tmp/ax900-recovery-test
 cc -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-misleading-indentation \
   -fsanitize=address,undefined -I tests/recovery_host -I tests/probe_host \
@@ -202,7 +218,7 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
 /tmp/ax900-frame-test
 ```
 
-企业网络实测使用用户显式选择的不校验证书模式；CA/域名校验通过 TLS 主机测试，尚未在真实企业网络验证。WPA2-Personal/开放网络实机连接、互联网 DNS/HTTP、重新认证、长期热插拔稳定性与吞吐仍待验证。协议及固件兼容性说明见 [固件说明](components/ax900/firmware/README.md)。
+企业网络实测使用用户显式选择的不校验证书模式；CA/域名校验通过 TLS 主机测试，尚未在真实企业网络验证。5 GHz WPA2-Personal 热点已通过 RSNXE 修复后的握手、DHCP 和网关测试；开放网络、重新认证和长期热插拔稳定性仍待验证。协议及固件兼容性说明见 [固件说明](components/ax900/firmware/README.md)。
 
 官方动画库修复的回归测试（先按接入说明应用依赖补丁）：
 

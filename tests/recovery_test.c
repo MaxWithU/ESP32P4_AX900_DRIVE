@@ -12,6 +12,7 @@ static unsigned saved_count=1;
 static ax900_ap_t synthetic_ap;
 static ax900_ap_t alternate_ap;
 static unsigned last_candidates;
+static bool connected_skip_save;
 int64_t esp_timer_get_time(void){return now;}
 static void complete(usb_transfer_t *t,int status){
     bool found=false;
@@ -57,6 +58,7 @@ esp_err_t usb_host_get_active_config_descriptor(usb_device_handle_t d,const usb_
 esp_err_t usb_host_interface_claim(usb_host_client_handle_t c,usb_device_handle_t d,uint8_t i,uint8_t a){(void)c;(void)d;(void)i;(void)a;return ESP_OK;}
 esp_err_t usb_host_interface_release(usb_host_client_handle_t c,usb_device_handle_t d,uint8_t i){(void)c;(void)d;(void)i;return ESP_OK;}
 esp_err_t usb_host_client_register(const usb_host_client_config_t *cfg,usb_host_client_handle_t *c){(void)cfg;*c=(void *)1;return ESP_OK;}
+esp_err_t usb_host_device_addr_list_fill(int size,uint8_t *addresses,int *count){assert(size>=1);addresses[0]=1;*count=1;return ESP_OK;}
 esp_err_t usb_host_client_deregister(usb_host_client_handle_t c){(void)c;return ESP_OK;}
 void usb_print_config_descriptor(const usb_config_desc_t *cfg,void *p){(void)cfg;(void)p;}
 void ax_parse_security(ax900_ap_t *ap){(void)ap;}
@@ -69,15 +71,24 @@ void ax_net_receive(void *arg,const uint8_t *p,size_t n){(void)arg;(void)p;(void
 void ax_net_disable_save(void){}
 void ax_net_debug_dhcp_timeout(void){}
 void ax_net_disconnect(ax900_device_t *d,uint16_t reason){(void)d;ax_link_state(false,false,false,NULL,reason);}
-esp_err_t ax_net_connect(ax900_device_t *d,ax_connect_request_t *r){(void)d;connections++;ax_link_state(false,true,true,NULL,0);ax_ip_state("192.0.2.1");ax_free_connect_request(r);return ESP_OK;}
+esp_err_t ax_net_connect(ax900_device_t *d,ax_connect_request_t *r){(void)d;connections++;connected_skip_save=r->skip_save;ax_link_state(false,true,true,NULL,0);ax_ip_state("192.0.2.1");ax_free_connect_request(r);return ESP_OK;}
+bool ax_profile_auto_enabled(const ax900_ap_t *ap){(void)ap;return true;}
+esp_err_t ax_profile_forget_network(const ax900_ap_t *ap){(void)ap;return ESP_OK;}
+esp_err_t ax_profile_set_auto(const ax900_ap_t *ap,bool enabled){(void)ap;(void)enabled;return ESP_OK;}
+esp_err_t ax_net_deinit(void){return ESP_OK;}
+void ax900_test_cancel(void){}
+void ax900_test_get_result(ax900_test_result_t *r){memset(r,0,sizeof(*r));}
+void ax900_probe_get_result(ax900_probe_result_t *r){memset(r,0,sizeof(*r));}
 esp_err_t ax_profile_init(void){return ESP_OK;}
 unsigned ax_profile_count(void){return saved_count;}
+unsigned ax_profile_auto_count(void){return saved_count;}
 esp_err_t ax_profile_forget(void){saved_count=0;return ESP_OK;}
 ax_connect_request_t *ax_profile_find(const ax900_ap_t *aps,size_t count){
     last_candidates=count;
     if(!saved_count || !count)return NULL;
     ax_connect_request_t *r=calloc(1,sizeof(*r));r->ap=aps[0];return r;
 }
+ax_connect_request_t *ax_profile_find_auto(const ax900_ap_t *aps,size_t count){return ax_profile_find(aps,count);}
 esp_err_t ax_scan(ax900_device_t *d){
     (void)d;scans++;state.ap_count=2;state.aps[0]=synthetic_ap;state.aps[1]=alternate_ap;
     if(cancel_during_scan)assert(ax900_disconnect()==ESP_OK);
@@ -90,6 +101,7 @@ static void reset(void){
     recovery=(ax_recovery_t){.enabled=true,.pending=true};target_valid=false;now=0;
     finish_tx=finish_cancel=true;fail_submit=fail_descriptor=fail_init=fail_net_init=cancel_during_scan=false;
     scan_requested=connect_requested=disconnect_requested=forget_requested=false;client=(void *)1;
+    lifecycle=AX900_RUNNING;operation_active=false;profile_action=0;resume_requested=false;
     saved_count=1;closes=net_stops=net_inits=scans=connections=last_candidates=0;
     synthetic_ap=(ax900_ap_t){.ssid_len=4,.raw_ssid="test",.frequency=5260};
     alternate_ap=(ax900_ap_t){.ssid_len=5,.raw_ssid="other",.frequency=5180};
@@ -166,5 +178,43 @@ int main(void){
     reset();assert(ax900_disconnect()==ESP_OK);pending[1]=true;client_step();client_step();assert(!recovery.enabled && !connections);assert(stop_device(active));
     // Forget cancels an already queued saved-profile attempt.
     reset();d=device();client_step();assert(connect_requested);assert(ax900_forget_saved()==ESP_OK);client_step();assert(!connections && !saved_count && !requested_connection);assert(stop_device(d));
+    // Turning off auto-connect does not discard a user's pending password update.
+    reset();d=device();recovery.pending=false;
+    ax_connect_request_t *manual=calloc(1,sizeof(*manual));manual->ap=synthetic_ap;
+    assert(queue_connect(manual)==ESP_OK);
+    assert(ax900_set_auto_connect(&synthetic_ap,false)==ESP_OK);client_step();
+    assert(connections==1 && !connected_skip_save && !recovery.enabled);assert(stop_device(d));
+    // Async slots stay USB-owned through a removal timeout and late completion.
+    reset();d=device();d->data_ep=1;d->associated=true;d->station=0;
+    uint8_t ethernet[100]={0};finish_tx=false;finish_cancel=false;
+    for(unsigned i=0;i<AX_DATA_SLOTS;i++)assert(ax_data_tx_async(d,ethernet,sizeof(ethernet))==ESP_OK);
+    assert(!ax_data_tx_available(d) && allocations==AX_DATA_SLOTS);
+    assert(ax_data_tx_async(d,ethernet,sizeof(ethernet))==ESP_ERR_NO_MEM);
+    d->gone=true;assert(!stop_device(d));assert(closes==0);
+    for(unsigned i=0;i<AX_DATA_SLOTS;i++)complete(d->data[i].transfer,USB_TRANSFER_STATUS_CANCELED);
+    assert(stop_device(d));assert(!allocations);
+    // Completed slots reuse their DMA allocation; incomplete transfers trip watchdog.
+    reset();d=device();d->data_ep=1;d->associated=true;d->station=0;
+    assert(ax_data_tx_async(d,ethernet,sizeof(ethernet))==ESP_OK);ax_pump(1);
+    assert(ax_data_tx_available(d) && allocations==1 && state.tx_packets==1);
+    assert(ax_data_tx_async(d,ethernet,sizeof(ethernet))==ESP_OK);finish_tx=false;now+=3000001;data_watchdog(d);
+    assert(d->fault);assert(stop_device(d));
+    reset();d=device();add_rx(d);finish_cancel=false;
+    assert(ax900_stop()==ESP_OK && ax900_get_lifecycle()==AX900_STOPPING);
+    assert(ax900_start()==ESP_ERR_INVALID_STATE);client_step();assert(active && client);
+    complete(d->rx,USB_TRANSFER_STATUS_CANCELED);client_step();
+    assert(ax900_get_lifecycle()==AX900_STOPPED && active==d && client && !allocations);
+    assert(ax900_start()==ESP_OK);client_step();assert(state.ready && active==d);client_step();
+    assert(ax900_stop()==ESP_OK);client_step();assert(ax900_get_lifecycle()==AX900_STOPPED);
+    // USB removal is still observed while stopped; never reuse state by address.
+    gone.dev_gone.dev_hdl=d->usb;event_cb(&gone,NULL);client_step();assert(!active && !state.present);
+    added.new_dev.address=2;event_cb(&added,NULL);client_step();assert(!active && pending[2]);
+    assert(ax900_start()==ESP_OK);client_step();assert(active && active->address==2);
+    assert(stop_device(active));client=NULL;lifecycle=AX900_STOPPED;
+    // A newly registered client must discover already enumerated devices, and
+    // must not take the event loop before official Wi-Fi initializes.
+    assert(ax900_start()==ESP_OK && pending[1]);
+    assert(esp_event_loop_create_default()==ESP_OK);
+    assert(ax900_stop()==ESP_OK);client_step();assert(ax900_get_lifecycle()==AX900_STOPPED);
     assert(!allocations);puts("Recovery tests passed: production USB ownership, late callbacks, initialization cleanup, retry budget, target selection, cancellation and auth pause");
 }

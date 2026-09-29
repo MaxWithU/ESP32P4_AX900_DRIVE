@@ -7,3 +7,12 @@ The RT-Smart implementation and its protocol declarations are licensed under
 Apache-2.0. Vendor firmware is fetched separately using the pinned source
 manifest in `firmware/`. Those vendor files are not covered by this component's
 Apache-2.0 license and remain subject to the applicable vendor terms.
+
+ax900_ping.c incorporates ESP-IDF v5.5.2 components/lwip/apps/ping/ping_sock.c
+Copyright 2019-2025 Espressif Systems (Shanghai) CO LTD, Apache-2.0.
+Adaptations: private AX900 function names and PSRAM-capable FreeRTOS task
+allocation/deletion. This source is pinned and maintained here; no SDK private
+source is included at build time. Original copyright header is preserved.
+
+Unmodified upstream ping_sock.c SHA-256:
+39b4be760a2137681f9f07d077c69b8de0cc1d88bed79ccfafaa1814d1d68fa5

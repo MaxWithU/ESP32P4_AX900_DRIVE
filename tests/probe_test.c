@@ -16,7 +16,7 @@ static esp_netif_t iface;
 static esp_ping_callbacks_t callbacks;
 int64_t esp_timer_get_time(void){return now;}
 bool ax900_connection_is_current(uint32_t id){return online && id==epoch;}
-void ax900_get_status(ax900_status_t *s){memset(s,0,sizeof(*s));s->connection_id=epoch;s->associated=s->authenticated=s->has_ip=online;}
+void ax900_get_link_status(ax900_link_status_t *s){memset(s,0,sizeof(*s));s->connection_id=epoch;s->associated=s->authenticated=s->has_ip=online;}
 esp_netif_t *esp_netif_get_handle_from_ifkey(const char *key){assert(!strcmp(key,"AX900"));return &iface;}
 esp_err_t esp_netif_get_ip_info(esp_netif_t *n,esp_netif_ip_info_t *ip){assert(n==&iface);ip->ip.addr=2;ip->gw.addr=1;return ESP_OK;}
 int esp_netif_get_netif_impl_index(esp_netif_t *n){assert(n==&iface);return 7;}

@@ -39,7 +39,7 @@ idf.py -C platforms/tab5 -p /dev/cu.usbmodem1101 flash
 
 已经安装相同官方分区布局时，可仅更新 `0x10000` 处的应用镜像 `platforms/tab5/build/m5stack_tab5.bin`。
 
-启动后点击右上角 **AX900 Wi-Fi**。列表显示 SSID、频段、信道和 RSSI；**Scan again** 重新扫描。点击网络可输入个人密码，或 PEAP/MSCHAPv2 的企业用户名和密码；连接后使用 **Disconnect** 断开。企业窗口按用户选择提供明确标记的“不校验证书”模式，API 也支持 PEM CA 与服务器域名。已实机验证 5 GHz PEAP/MSCHAPv2、DHCP 和网关通信，验证范围见根目录 README 与 VALIDATION.json。
+启动后点击右上角 **AX900 Wi-Fi**。列表合并同名同认证策略的 Wi-Fi，显示 SSID、频段、AP 数和 RSSI；**Scan again** 重新扫描。点击网络可输入个人密码，或 PEAP/MSCHAPv2 的企业用户名和密码；连接后使用 **Disconnect** 断开。企业窗口按用户选择提供明确标记的“不校验证书”模式，API 也支持 PEM CA 与服务器域名。已实机验证 5 GHz PEAP/MSCHAPv2、DHCP 和网关通信，验证范围见根目录 README 与 VALIDATION.json。
 
 官方 `sdkconfig` 已启用 `CONFIG_LV_USE_SNAPSHOT=y`，补丁将此设置也加入 `sdkconfig.defaults`，以支持 `ax900 snapshot`；保留官方非阻塞 USB Serial/JTAG VFS 行为。串口命令和主机截图解码脚本见根目录 README。
 
@@ -51,8 +51,12 @@ idf.py -C platforms/tab5 -p /dev/cu.usbmodem1101 flash
 
 实体键盘使用量产 Tab5Keyboard 的 I²C 0x6D 协议（SDA=0、SCL=1），使用 ESP32-P4 的独立 LP I²C 控制器，Port A 继续使用原引脚 53/54，支持热接入。未使用旧的 TCA8418 测试程序；没有按键日志。`Aa` 按住为大写/Shift，`Sym` 按住使用符号层；Tab / Aa+Tab 切换焦点，Enter 从用户名移至密码、从密码移至 Connect，再按 Enter 连接；Esc 关闭输入窗口。可用 Tab 选中 Run test 再按 Enter。窗口状态栏显示键盘连接情况。
 
-认证且 DHCP 成功后自动保存最多 4 个网络，窗口显示 Wi-Fi saved。重启扫描后自动尝试最近成功的网络，优先同名 5 GHz AP；意外掉线与 USB 故障使用有限退避重连；认证失败暂停，手动断开后保持离线。详细重试策略见 README。已保存的网络提供 Use saved login，也可直接输入新密码。Forget saved 只删除 AX900 命名空间，当前连接继续可用且不会立即重新保存。没有账号/密码串口输入或导出命令；凭据窗口禁止截图。NVS 默认未加密，详见 README。
+认证且 DHCP 成功后自动保存最多 4 个网络，窗口显示 Wi-Fi saved。重启扫描后自动尝试最近成功的网络，优先同名 5 GHz AP；意外掉线与 USB 故障使用有限退避重连；认证失败暂停，手动断开后保持离线。详细重试策略见 README。已保存的网络提供 Use saved login，也可直接输入新密码。Saved networks 可逐个删除网络或设置 Auto connect；删除当前配置后连接继续可用且不会立即重新保存。没有账号/密码串口输入或导出命令；凭据窗口禁止截图。NVS 默认未加密，详见 README。
 
-Ping 使用 SDK 自带实现，在启用 CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM 的 Tab5 固件上将任务栈放入 PSRAM；删除使用对应的 vTaskDeleteWithCaps。其他未启用外部任务栈的平台仍使用 SDK 默认分配方式。
+Ping 使用仓库内固定到 ESP-IDF 5.5.2 的实现，在启用 CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM 的 Tab5 固件上将任务栈放入 PSRAM；删除使用对应的 vTaskDeleteWithCaps。其他未启用外部任务栈的平台仍使用 SDK 默认分配方式。
 
 故障注入默认关闭。实机开发测试可在 menuconfig 的 AX900 菜单临时启用 `CONFIG_AX900_FAULT_INJECTION`，运行本仓库的 `tools/test_recovery_hardware.py`；验证后关闭该选项重新构建正式固件。原始串口、构建日志与截图只存本机忽略目录，不上传云端。
+
+Connection test 还提供 DNS、TCP、HTTP、上传、下载和 UDP 往返测试；在 Target 中配置目标。上传/下载/UDP 需局域网电脑运行 `tools/benchmark_peer.py`。结果显示耗时、速率、回复数、HTTP 状态和失败阶段；只通过 AX900 接口测试。目标仅保存在 RAM。
+
+企业连接窗口可取消“不校验证书”，填写服务器 DNS 名及 `/sd/` 下的 PEM CA 路径。保存网络页只显示元数据，不显示密码。当前设备仍使用普通 NVS；受保护存储的配置步骤和限制见 `docs/driver-development.md`。

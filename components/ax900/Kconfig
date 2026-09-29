@@ -5,4 +5,20 @@ config AX900_FAULT_INJECTION
     help
         Enables controlled RX cancellation, link drop, and DHCP timeout tests.
         Disabled by default. Only for development firmware.
+config AX900_ENCRYPTED_PROFILES
+    bool "Require preprovisioned protected encrypted Wi-Fi storage"
+    default n
+    depends on NVS_ENCRYPTION
+    help
+        Requires flash encryption already enabled and a provisioned encrypted NVS
+        keys partition. The driver never burns eFuses or generates keys. Failure
+        leaves credential storage unavailable; there is no plaintext fallback.
+config AX900_PROFILE_PARTITION
+    string "NVS partition containing AX900 profiles"
+    default "ax900_nvs" if AX900_ENCRYPTED_PROFILES
+    default "nvs"
+config AX900_PROFILE_KEYS_PARTITION
+    string "Preprovisioned encrypted NVS keys partition"
+    depends on AX900_ENCRYPTED_PROFILES
+    default "nvs_keys"
 endmenu

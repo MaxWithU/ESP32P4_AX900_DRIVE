@@ -26,6 +26,8 @@ void ax_status(const char *s){(void)s;}
 void ax900_get_status(ax900_status_t *s){memset(s,0,sizeof(*s));}
 void ax_pump(unsigned ms){(void)ms;}
 int64_t esp_timer_get_time(void){return 0;}
+void ax900_get_radio_config(ax900_radio_config_t *out){*out=(ax900_radio_config_t){.country="CN",.allow_dfs=true};}
+void ax_radio_report(uint32_t version,uint32_t features){(void)version;(void)features;}
 int main(void){
     ax900_device_t d={0};fail_power=true;
     assert(ax_runtime_init(&d)==ESP_FAIL);assert(d.radio_started && !d.radio_configured);

@@ -73,12 +73,10 @@ esp_err_t ax900_probe_start(void) {
     for(unsigned i=0;i<AX900_PROBE_COUNT;i++)result.rtt_ms[i]=-1;
     taskEXIT_CRITICAL(&probe_lock);
 
-    ax900_status_t *link=malloc(sizeof(*link));
-    if(!link)return failed_start(ESP_ERR_NO_MEM);
-    ax900_get_status(link);
-    uint32_t connection_id=link->connection_id;
-    bool ready=link->associated && link->authenticated && link->has_ip;
-    free(link);
+    ax900_link_status_t link;ax900_get_link_status(&link);
+    uint32_t connection_id=link.connection_id;
+    bool ready=link.associated && link.authenticated && link.has_ip;
+    if(!ready)return failed_start(ESP_ERR_INVALID_STATE);
     esp_netif_t *netif=esp_netif_get_handle_from_ifkey("AX900");
     esp_netif_ip_info_t ip={0};
     if(!ready || !netif || esp_netif_get_ip_info(netif,&ip)!=ESP_OK || !ip.ip.addr || !ip.gw.addr)

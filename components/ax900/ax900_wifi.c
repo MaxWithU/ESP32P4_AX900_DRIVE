@@ -7,6 +7,7 @@
 #include "esp_timer.h"
 #include "esp_mac.h"
 #include <stdlib.h>
+#include "ax900_channels.h"
 
 // CN (SRRC) channels from the matching vendor powerlimit file. Passive scans.
 static const uint8_t channels5[]={36,40,44,48,52,56,60,64,149,153,157,161,165};
@@ -58,18 +59,18 @@ esp_err_t ax_runtime_init(ax900_device_t *d) {
     TRY(ax_command(d,AIC_MM_VERSION_REQ,AIC_MM_VERSION_CFM,NULL,0,&version,sizeof(version),&got));
     if(got!=sizeof(version))return ESP_ERR_INVALID_RESPONSE;
     ESP_LOGI("AX900","RUNTIME_VERSION=%08lx features=%08lx PHY=%08lx",(unsigned long)version.lmac_version,(unsigned long)version.features,(unsigned long)version.phy_version1);
+    ax_radio_report(version.lmac_version,version.features);
     // Start conservatively at HT40; D40 variants can share the D80 USB identity.
     struct aic_wire_me_config_req me={0};
     me.ht.capability=0x0963;me.ht.ampdu_parameters=31;me.ht.mcs_rate[0]=0xff;me.ht.mcs_rate[4]=1;
     put16(me.ht.mcs_rate+10,150);me.ht.mcs_rate[12]=1;
     me.tx_lifetime=1000;me.ht_supported=1;me.max_bandwidth=1;
     TRY(command(d,AIC_ME_CONFIG_REQ,AIC_ME_CONFIG_CFM,&me,sizeof(me)));
+    ax900_radio_config_t policy;ax900_get_radio_config(&policy);
     uint8_t channels[254]={0};
-    for(unsigned i=0;i<13;i++)channel(channels+6*i,i+1,false,false);
-    channels[252]=13;
+    for(unsigned i=1;i<=13;i++)if(ax_channel_allowed(&policy,i,false))channel(channels+6*channels[252]++,i,false,false);
     if(stack_reply.supports_5ghz) {
-        for(unsigned i=0;i<sizeof(channels5);i++)channel(channels+84+6*i,channels5[i],true,false);
-        channels[253]=sizeof(channels5);
+        for(unsigned i=0;i<sizeof(channels5);i++)if(ax_channel_allowed(&policy,channels5[i],true))channel(channels+84+6*channels[253]++,channels5[i],true,false);
     }
     TRY(command(d,AIC_ME_CHAN_CONFIG_REQ,AIC_ME_CHAN_CONFIG_CFM,channels,sizeof(channels)));
     struct aic_wire_mm_start_req start={.uapsd_timeout=300,.lp_clock_accuracy=20};
@@ -83,13 +84,14 @@ esp_err_t ax_runtime_init(ax900_device_t *d) {
     return ESP_OK;
 }
 esp_err_t ax_scan(ax900_device_t *d) {
-    ax900_status_t *status=malloc(sizeof(*status));if(!status)return ESP_ERR_NO_MEM;
-    ax900_get_status(status);bool band5=status->supports_5ghz;free(status);
+    bool band5=d->supports_5ghz;ax900_radio_config_t policy;ax900_get_radio_config(&policy);
     for(unsigned band=0;band<(band5?2:1);band++) {
         struct aic_wire_scanu_start_req scan={0};
         memset(&scan.bssid,0xff,sizeof(scan.bssid));scan.vif_index=d->vif;
-        scan.channel_count=band?sizeof(channels5):13;
-        for(unsigned i=0;i<scan.channel_count;i++)channel((uint8_t *)&scan.channels[i],band?channels5[i]:i+1,band,true);
+        for(unsigned i=0;i<(band?sizeof(channels5):13);i++){
+            unsigned number=band?channels5[i]:i+1;
+            if(ax_channel_allowed(&policy,number,band))channel((uint8_t *)&scan.channels[scan.channel_count++],number,band,true);
+        }
         d->scan_done=false;d->scan_result=0xff;
         // Acceptance is only an acknowledgement; status arrives in SCANU_START_CFM.
         TRY(ax_command(d,AIC_SCANU_START_REQ,AIC_SCANU_START_ACCEPTED,&scan,sizeof(scan),NULL,0,NULL));

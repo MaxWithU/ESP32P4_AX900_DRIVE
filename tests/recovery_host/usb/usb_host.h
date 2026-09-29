@@ -1,8 +1,9 @@
 #pragma once
-#include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+esp_err_t usb_host_device_addr_list_fill(int list_len,uint8_t *addresses,int *count);
+#include <stdbool.h>
+#include <stddef.h>
 typedef void *usb_host_client_handle_t;
 typedef void *usb_device_handle_t;
 typedef struct usb_transfer {

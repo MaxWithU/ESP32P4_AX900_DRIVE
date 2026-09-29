@@ -37,8 +37,8 @@ set(ax900_supplicant_sources
     "supplicant/src/crypto/aes-omac1.c"
 )
 
-idf_component_register(SRCS ${ax900_supplicant_sources} "ax900_ping.c" "ax900_profile.c" "ax900_probe.c" "ax900_tls.c" "ax900_net.c" "ax900_supplicant_port.c" "ax900_usb.c" "ax900_firmware.c" "ax900_wifi.c"
-    INCLUDE_DIRS "include" PRIV_INCLUDE_DIRS "." "supplicant/src" "supplicant/src/utils" "$ENV{IDF_PATH}/components/lwip" REQUIRES usb esp_timer esp_netif esp_event esp_hw_support mbedtls lwip nvs_flash
+idf_component_register(SRCS ${ax900_supplicant_sources} "ax900_pool.c" "ax900_metrics.c" "ax900_test.c" "ax900_ping.c" "ax900_profile.c" "ax900_probe.c" "ax900_tls.c" "ax900_net.c" "ax900_supplicant_port.c" "ax900_usb.c" "ax900_firmware.c" "ax900_wifi.c"
+    INCLUDE_DIRS "include" PRIV_INCLUDE_DIRS "." "supplicant/src" "supplicant/src/utils" REQUIRES usb esp_timer esp_netif esp_event esp_hw_support mbedtls lwip nvs_flash esp_partition bootloader_support
     EMBED_FILES "firmware/fw_adid_8800d80_u02.bin"
                 "firmware/fw_patch_8800d80_u02.bin"
                 "firmware/fw_patch_table_8800d80_u02.bin"
@@ -46,3 +46,6 @@ idf_component_register(SRCS ${ax900_supplicant_sources} "ax900_ping.c" "ax900_pr
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE CONFIG_NO_RANDOM_POOL CONFIG_NO_STDOUT_DEBUG CONFIG_NO_WPA_MSG CONFIG_NO_TKIP IEEE8021X_EAPOL EAP_PEAP EAP_MSCHAPv2 bswap_16=__builtin_bswap16 bswap_32=__builtin_bswap32 bswap_64=__builtin_bswap64 CONFIG_NO_SOCKLEN_T_TYPEDEF __BYTE_ORDER=__ORDER_LITTLE_ENDIAN__ __LITTLE_ENDIAN=__ORDER_LITTLE_ENDIAN__ __BIG_ENDIAN=__ORDER_BIG_ENDIAN__)
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-unused-parameter -Wno-misleading-indentation)
+
+# Keep this vendored Hostap independent from ESP-IDF/native Wi-Fi supplicants.
+target_compile_options(${COMPONENT_LIB} PRIVATE -include "${CMAKE_CURRENT_LIST_DIR}/ax900_symbols.h")

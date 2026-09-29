@@ -18,12 +18,15 @@
 #include "mbedtls/platform_util.h"
 #include <stdatomic.h>
 #include "ax900_profile.h"
+#include "ax900_pool.h"
+#include "ax900_metrics.h"
 
-struct packet { uint32_t generation;size_t len;bool encrypted;uint8_t bytes[1518]; };
+static bool eap_methods_registered;
+static portMUX_TYPE io_lock=portMUX_INITIALIZER_UNLOCKED;
 static struct {
     ax900_device_t *d;
     esp_netif_t *netif;
-    QueueHandle_t rx,tx;
+    QueueHandle_t rx,tx,eap_rx;
     struct wpa_sm *sm;
     struct eapol_sm *eapol;
     struct eap_peer_config eap_config;
@@ -38,7 +41,16 @@ static struct {
     uint16_t reason;
     int64_t deadline, dhcp_deadline;
     unsigned dhcp_retries;
+    ax900_ipv4_info_t addresses;
 } net;
+
+bool ax900_get_ipv4_info(ax900_ipv4_info_t *out){
+    if(!out)return false;
+    taskENTER_CRITICAL(&io_lock);
+    bool valid=net.has_ip && net.authenticated;
+    if(valid)*out=net.addresses;else memset(out,0,sizeof(*out));
+    taskEXIT_CRITICAL(&io_lock);return valid;
+}
 
 void ax_parse_security(ax900_ap_t *ap) {
     ap->enterprise=ap->wpa2_psk=ap->sae=ap->pmf_required=false;
@@ -52,41 +64,59 @@ void ax_parse_security(ax900_ap_t *ap) {
 static esp_err_t network_tx(void *handle,void *data,size_t length) {
     uint32_t generation=atomic_load(&net.generation);
     if(!net.authenticated || !net.tx || length<14 || length>1518)return ESP_ERR_INVALID_STATE;
-    struct packet *p=malloc(sizeof(*p));if(!p)return ESP_ERR_NO_MEM;
+    ax_packet_t *p=ax_pool_acquire(AX_PACKET_TX);if(!p){ax_metric_add(AX900_TX_POOL_EMPTY,1);return ESP_ERR_NO_MEM;}
     p->generation=generation;p->len=length;memcpy(p->bytes,data,length);
-    if(xQueueSend(net.tx,&p,0)!=pdTRUE){free(p);return ESP_ERR_NO_MEM;}
+    taskENTER_CRITICAL(&io_lock);
+    bool current=net.authenticated && generation==atomic_load(&net.generation);
+    bool queued=current && xQueueSend(net.tx,&p,0)==pdTRUE;
+    unsigned depth=queued?uxQueueMessagesWaiting(net.tx):0;
+    taskEXIT_CRITICAL(&io_lock);
+    if(!queued){ax_pool_release(p);ax_metric_add(current?AX900_TX_QUEUE_FULL:AX900_TX_STALE,1);return current?ESP_ERR_NO_MEM:ESP_ERR_INVALID_STATE;}
+    ax_metric_peak(AX900_TX_QUEUE_PEAK,depth);
     return ESP_OK;
 }
-static void free_rx(void *handle,void *buffer) {free(buffer);}
+static void free_rx(void *handle,void *buffer) {if(buffer)ax_pool_release((ax_packet_t *)((uint8_t *)buffer - offsetof(ax_packet_t,bytes)));}
 static void ip_event(void *arg,esp_event_base_t base,int32_t id,void *data) {
     ip_event_got_ip_t *event=data;
     if(!event || event->esp_netif!=net.netif)return;
     if(id==IP_EVENT_ETH_LOST_IP){net.has_ip=false;ax_ip_state(NULL);if(net.authenticated)net.ip_lost=true;return;}
     if(id==IP_EVENT_ETH_GOT_IP && net.authenticated) {
-        net.has_ip=true;
+        ax900_ipv4_info_t addresses={0};esp_netif_dns_info_t dns={0};
+        snprintf(addresses.ip,sizeof(addresses.ip),IPSTR,IP2STR(&event->ip_info.ip));
+        snprintf(addresses.gateway,sizeof(addresses.gateway),IPSTR,IP2STR(&event->ip_info.gw));
+        snprintf(addresses.netmask,sizeof(addresses.netmask),IPSTR,IP2STR(&event->ip_info.netmask));
+        if(esp_netif_get_dns_info(net.netif,ESP_NETIF_DNS_MAIN,&dns)==ESP_OK && dns.ip.type==ESP_IPADDR_TYPE_V4 && dns.ip.u_addr.ip4.addr)
+            snprintf(addresses.dns,sizeof(addresses.dns),IPSTR,IP2STR(&dns.ip.u_addr.ip4));
+        taskENTER_CRITICAL(&io_lock);
+        bool accepted=net.authenticated;
+        if(accepted){net.addresses=addresses;net.has_ip=true;}
+        taskEXIT_CRITICAL(&io_lock);
+        if(!accepted)return;
         char ip[16];snprintf(ip,sizeof(ip),IPSTR,IP2STR(&event->ip_info.ip));ax_ip_state(ip);
         char status[96];snprintf(status,sizeof(status),"Connected: %s",ip);ax_status(status);
     }
 }
 esp_err_t ax_net_init(ax900_device_t *d) {
     if(!net.netif) {
+        TRY(ax_pool_init());
         TRY(esp_netif_init());
         esp_err_t e=esp_event_loop_create_default();if(e!=ESP_OK && e!=ESP_ERR_INVALID_STATE)return e;
         esp_netif_inherent_config_t base=ESP_NETIF_INHERENT_DEFAULT_ETH();
         base.if_key="AX900";base.if_desc="AX900 USB Wi-Fi";base.route_prio=90;
         esp_netif_driver_ifconfig_t driver={.handle=&net,.transmit=network_tx,.driver_free_rx_buffer=free_rx};
         esp_netif_config_t cfg={.base=&base,.driver=&driver,.stack=ESP_NETIF_NETSTACK_DEFAULT_ETH};
-        net.rx=xQueueCreate(24,sizeof(struct packet *));net.tx=xQueueCreate(24,sizeof(struct packet *));
+        net.rx=xQueueCreate(32,sizeof(ax_packet_t *));net.tx=xQueueCreate(24,sizeof(ax_packet_t *));
+        net.eap_rx=xQueueCreate(8,sizeof(ax_packet_t *));
         net.netif=esp_netif_new(&cfg);
-        e=(!net.netif || !net.rx || !net.tx)?ESP_ERR_NO_MEM:ESP_OK;
+        e=(!net.netif || !net.rx || !net.tx || !net.eap_rx)?ESP_ERR_NO_MEM:ESP_OK;
         if(e==ESP_OK)e=esp_event_handler_register(IP_EVENT,IP_EVENT_ETH_GOT_IP,ip_event,NULL);
         if(e==ESP_OK)e=esp_event_handler_register(IP_EVENT,IP_EVENT_ETH_LOST_IP,ip_event,NULL);
         if(e!=ESP_OK){
             esp_event_handler_unregister(IP_EVENT,IP_EVENT_ETH_GOT_IP,ip_event);
             esp_event_handler_unregister(IP_EVENT,IP_EVENT_ETH_LOST_IP,ip_event);
             if(net.netif)esp_netif_destroy(net.netif);
-            if(net.rx)vQueueDelete(net.rx);if(net.tx)vQueueDelete(net.tx);
-            net.netif=NULL;net.rx=net.tx=NULL;return e;
+            if(net.rx)vQueueDelete(net.rx);if(net.tx)vQueueDelete(net.tx);if(net.eap_rx)vQueueDelete(net.eap_rx);
+            net.netif=NULL;net.rx=net.tx=net.eap_rx=NULL;return e;
         }
     }
     net.d=d;memset(net.keys,0xff,sizeof(net.keys));net.recycled=false;
@@ -94,17 +124,20 @@ esp_err_t ax_net_init(ax900_device_t *d) {
     esp_netif_action_start(net.netif,NULL,0,NULL);
     return ESP_OK;
 }
-static void drain(QueueHandle_t q) {struct packet *p;while(q && xQueueReceive(q,&p,0)==pdTRUE)free(p);}
+static void drain(QueueHandle_t q) {ax_packet_t *p;while(q && xQueueReceive(q,&p,0)==pdTRUE)ax_pool_release(p);}
 static void clear_link(void) {
     net.save_attempted=false;net.ip_lost=false;net.dhcp_retries=0;net.failed=false;
-    net.authenticated=false;net.has_ip=false;net.dhcp_deadline=0;atomic_fetch_add(&net.generation,1);net.authorize=false;net.deadline=0;
+    taskENTER_CRITICAL(&io_lock);
+    net.authenticated=false;atomic_fetch_add(&net.generation,1);
+    taskEXIT_CRITICAL(&io_lock);
+    net.has_ip=false;net.dhcp_deadline=0;net.authorize=false;net.deadline=0;
     if(net.netif)esp_netif_action_disconnected(net.netif,NULL,0,NULL);
     if(net.sm){wpa_sm_deinit(net.sm);net.sm=NULL;}
     if(net.eapol){eapol_sm_deinit(net.eapol);net.eapol=NULL;}
     ax_free_connect_request(net.credentials);net.credentials=NULL;
     memset(&net.eap_config,0,sizeof(net.eap_config));
     net.wpa_state=WPA_DISCONNECTED;
-    drain(net.rx);drain(net.tx);
+    drain(net.rx);drain(net.tx);drain(net.eap_rx);
     ax_link_state(false,false,false,NULL,net.reason);
     if(net.d){net.d->associated=false;net.d->station=0xff;net.d->link_event=false;net.d->disconnected=false;}
 }
@@ -125,11 +158,17 @@ static void wpa_state(void *ctx,enum wpa_states state) {
     if(state==WPA_COMPLETED)net.authorize=true;
 }
 static enum wpa_states get_wpa_state(void *ctx){return net.wpa_state;}
-static void deauth(void *ctx,u16 reason){net.failed=true;net.reason=reason;}
+static void deauth(void *ctx,u16 reason){
+    if(!net.failed){net.reason=reason;ESP_LOGW("AX900","Supplicant rejected security exchange: reason=%u",reason);}
+    net.failed=true;
+}
 static void reconnect(void *ctx){net.failed=true;net.reason=1;}
 static void *network_context(void *ctx){return &net;}
 static int get_bssid(void *ctx,u8 *bssid){memcpy(bssid,net.d->bssid,6);return 0;}
-static int get_beacon(void *ctx){return wpa_sm_set_ap_rsn_ie(net.sm,net.ap.rsn,net.ap.rsn_len);}
+static int get_beacon(void *ctx){
+    if(wpa_sm_set_ap_rsn_ie(net.sm,net.ap.rsn,net.ap.rsn_len))return -1;
+    return wpa_sm_set_ap_rsnxe(net.sm,net.ap.rsnxe_len?net.ap.rsnxe:NULL,net.ap.rsnxe_len);
+}
 static void cancel_auth(void *ctx){net.deadline=0;}
 static int protection(void *ctx,const u8 *addr,int protect,int type){return 0;}
 static int add_pmkid(void *ctx,void *network,const u8 *bssid,const u8 *pmkid,const u8 *cache,const u8 *pmk,size_t len,u32 lifetime,u8 threshold,int akmp){return 0;}
@@ -187,11 +226,10 @@ static void eap_status(void *ctx,const char *status,const char *parameter) {
     else if(!strcmp(status,"completion"))ESP_LOGI("AX900","EAP method completed");
 }
 static esp_err_t setup_eap(void) {
-    static bool registered;
     static struct eap_method_type methods[]={{EAP_VENDOR_IETF,EAP_TYPE_PEAP},{EAP_VENDOR_IETF,EAP_TYPE_NONE}};
-    if(!registered){
+    if(!eap_methods_registered){
         if((eap_peer_peap_register() || eap_peer_mschapv2_register())){eap_peer_unregister_methods();return ESP_FAIL;}
-        registered=true;
+        eap_methods_registered=true;
     }
     ax_connect_request_t *r=net.credentials;
     struct eap_peer_config *c=&net.eap_config;
@@ -234,6 +272,8 @@ static esp_err_t confirm_target(ax900_device_t *d,const ax900_ap_t *ap) {
 }
 static esp_err_t connect_request(ax900_device_t *d,ax_connect_request_t *request) {
     if(net.d!=d){ax_free_connect_request(request);return ESP_ERR_INVALID_STATE;}
+    esp_err_t quiet=ax_data_quiesce(d);
+    if(quiet!=ESP_OK){ax_free_connect_request(request);return quiet;}
     clear_link();net.credentials=request;
     const ax900_ap_t *ap=&request->ap;const char *password=request->password;
     ax_link_state(true,false,false,ap->ssid,0);net.ap=*ap;net.failed=false;net.reason=0;
@@ -276,7 +316,7 @@ static esp_err_t connect_request(ax900_device_t *d,ax_connect_request_t *request
         if(result){mbedtls_platform_zeroize(pmk,sizeof(pmk));return ESP_ERR_INVALID_ARG;}
         wpa_sm_set_pmk(net.sm,pmk,sizeof(pmk),NULL,NULL);mbedtls_platform_zeroize(pmk,sizeof(pmk));
         }
-        if(wpa_sm_set_ap_rsn_ie(net.sm,ap->rsn,ap->rsn_len))return ESP_FAIL;
+        if(get_beacon(NULL))return ESP_FAIL;
         size_t ie_len=sizeof(req.ie_buffer);
         if(wpa_sm_set_assoc_wpa_ie_default(net.sm,(uint8_t *)req.ie_buffer,&ie_len))return ESP_FAIL;
         req.ie_length=ie_len;req.flags=1|2|8;
@@ -295,9 +335,13 @@ esp_err_t ax_net_connect(ax900_device_t *d,ax_connect_request_t *request) {
 }
 static void enqueue_rx(void *ctx,const uint8_t *data,size_t length,bool encrypted) {
     if(length>1518 || !net.rx)return;
-    struct packet *p=malloc(sizeof(*p));if(!p){ax_packet_count(false,true);return;}
-    p->len=length;p->encrypted=encrypted;memcpy(p->bytes,data,length);
-    if(xQueueSend(net.rx,&p,0)!=pdTRUE){free(p);ax_packet_count(false,true);}
+    bool eapol=length>=14 && data[12]==0x88 && data[13]==0x8e;
+    ax_packet_t *p=ax_pool_acquire(eapol?AX_PACKET_EAPOL:AX_PACKET_RX);
+    if(!p){ax_packet_count(false,true);ax_metric_add(AX900_RX_POOL_EMPTY,1);return;}
+    p->generation=atomic_load(&net.generation);p->len=length;p->encrypted=encrypted;memcpy(p->bytes,data,length);
+    QueueHandle_t queue=eapol?net.eap_rx:net.rx;
+    if(xQueueSend(queue,&p,0)!=pdTRUE){ax_pool_release(p);ax_packet_count(false,true);ax_metric_add(AX900_RX_QUEUE_FULL,1);}
+    else ax_metric_peak(AX900_RX_QUEUE_PEAK,uxQueueMessagesWaiting(net.rx)+uxQueueMessagesWaiting(net.eap_rx));
 }
 void ax_net_receive(void *arg,const uint8_t *record,size_t length) {
     ax900_device_t *d=arg;
@@ -308,14 +352,14 @@ void ax_net_receive(void *arg,const uint8_t *record,size_t length) {
             ESP_LOGI("AX900","Management subtype=%u status=%u",subtype,get16(f+(subtype==11?28:subtype==1?26:24)));
     }
     if(!d->associated)return;
-    if(!ax_decode_rx(record,length,d->vif,d->bssid,enqueue_rx,NULL))ax_packet_count(false,true);
+    if(!ax_decode_rx(record,length,d->vif,d->bssid,enqueue_rx,NULL)){ax_packet_count(false,true);ax_metric_add(AX900_RX_MALFORMED,1);}
 }
 void ax_net_poll(ax900_device_t *d) {
     if(d!=net.d || d->fault || d->gone || d->stopping)return;
     if(d->disconnected){
         bool session=net.credentials!=NULL;
         bool diagnostic=session && net.credentials->association_test;
-        net.reason=d->disconnect_reason;
+        if(!net.failed)net.reason=d->disconnect_reason;
         // A rejection during authentication can indicate stale credentials.
         bool auth_failure=session && (!net.authenticated || (net.reason>=14 && net.reason<=24));
         clear_link();ax_status("Access point disconnected");
@@ -336,21 +380,25 @@ void ax_net_poll(ax900_device_t *d) {
             else net.authorize=true;
         }
     }
-    struct packet *p;
-    for(unsigned budget=0;budget<24 && !d->fault && !d->gone && xQueueReceive(net.rx,&p,0)==pdTRUE;budget++) {
+    ax_packet_t *p;
+    for(unsigned budget=0;budget<32 && !d->fault && !d->gone;budget++) {
+        if(xQueueReceive(net.eap_rx,&p,0)!=pdTRUE && xQueueReceive(net.rx,&p,0)!=pdTRUE)break;
+        if(p->generation!=atomic_load(&net.generation)){ax_metric_add(AX900_RX_STALE,1);ax_pool_release(p);continue;}
+        ax_metric_add(AX900_RX_BYTES,p->len);
         ax_packet_count(false,false);
         bool eapol=p->len>=14 && p->bytes[12]==0x88 && p->bytes[13]==0x8e;
         if(eapol && net.sm && !memcmp(p->bytes+6,d->bssid,6)) {
-            ESP_LOGI("AX900","EAPOL received (%u bytes)",(unsigned)p->len);
+            ax_metric_add(AX900_EAPOL_RX,1);
             enum frame_encryption encryption=p->encrypted?FRAME_ENCRYPTED:FRAME_NOT_ENCRYPTED;
             if(net.eapol)eapol_sm_rx_eapol(net.eapol,p->bytes+6,p->bytes+14,p->len-14,encryption);
             if(p->len>=18 && p->bytes[15]==IEEE802_1X_TYPE_EAPOL_KEY)
                 wpa_sm_rx_eapol(net.sm,p->bytes+6,p->bytes+14,p->len-14,encryption);
         } else if(net.authenticated && !eapol) {
-            void *copy=malloc(p->len);
-            if(copy){memcpy(copy,p->bytes,p->len);(void)esp_netif_receive(net.netif,copy,p->len,NULL);}
-        }
-        free(p);
+            // esp_netif owns this buffer on every ethernetif_input return path.
+            // Its pbuf free callback returns the original pool slot.
+            (void)esp_netif_receive(net.netif,p->bytes,p->len,NULL);p=NULL;
+        } else ax_metric_add(AX900_RX_UNAUTHORIZED,1);
+        ax_pool_release(p);
     }
     if(d->fault || d->gone)return;
     ax_supplicant_poll();
@@ -389,8 +437,11 @@ void ax_net_poll(ax900_device_t *d) {
         esp_err_t e=ax_profile_save(net.credentials);ax_profile_status(e==ESP_OK,e);
         ESP_LOGI("AX900","Wi-Fi profile save: %s",esp_err_to_name(e));
     }
-    for(unsigned budget=0;budget<8 && !d->fault && !d->gone && xQueueReceive(net.tx,&p,0)==pdTRUE;budget++) {
-        if(net.authenticated && p->generation==atomic_load(&net.generation))(void)ax_data_tx(d,p->bytes,p->len);free(p);
+    for(unsigned budget=0;budget<8 && !d->fault && !d->gone && ax_data_tx_available(d) && xQueueReceive(net.tx,&p,0)==pdTRUE;budget++) {
+        if(net.authenticated && p->generation==atomic_load(&net.generation)){
+            if(ax_data_tx_async(d,p->bytes,p->len)!=ESP_OK)ax_metric_add(AX900_TX_USB_FAILED,1);
+        } else ax_metric_add(AX900_TX_STALE,1);
+        ax_pool_release(p);
     }
 }
 void ax_net_disable_save(void){net.save_attempted=true;}
@@ -400,3 +451,16 @@ void ax_net_debug_dhcp_timeout(void) {
     net.has_ip=false;ax_ip_state(NULL);net.dhcp_retries=2;net.dhcp_deadline=esp_timer_get_time()-1;
 }
 #endif
+
+esp_err_t ax_net_deinit(void){
+    if(net.d || ax_pool_used())return ESP_ERR_INVALID_STATE;
+    if(net.netif){
+        esp_event_handler_unregister(IP_EVENT,IP_EVENT_ETH_GOT_IP,ip_event);
+        esp_event_handler_unregister(IP_EVENT,IP_EVENT_ETH_LOST_IP,ip_event);
+        esp_netif_destroy(net.netif);net.netif=NULL;
+    }
+    if(net.rx)vQueueDelete(net.rx);if(net.tx)vQueueDelete(net.tx);if(net.eap_rx)vQueueDelete(net.eap_rx);
+    net.rx=net.tx=net.eap_rx=NULL;
+    if(eap_methods_registered){eap_peer_unregister_methods();eap_methods_registered=false;}
+    ax_supplicant_reset();return ax_pool_destroy();
+}
