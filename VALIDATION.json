@@ -56,7 +56,7 @@
     "24-hour sustained operation",
     "Protected storage deployment on hardware; current Tab5 remains ordinary NVS",
     "WPA3-SAE, PMF and seamless roaming are not implemented",
-    "Physical USB replug with the new asynchronous packet path"
+    "Gateway reachability in the same uninterrupted physical USB replug session; initial two cycles reached authentication and DHCP"
   ],
   "host_tests": {
     "frame": "ASan/UBSan: captured frames, truncation, aggregation and 100000 malformed inputs passed",
@@ -363,5 +363,24 @@
     }
   },
   "application_bytes": 6453888,
-  "application_sha256": "280ac851751cafb92f4ce017627cd8b09eb95f7feac61d5c019f184aadf2c2c3"
+  "application_sha256": "280ac851751cafb92f4ce017627cd8b09eb95f7feac61d5c019f184aadf2c2c3",
+  "physical_usb_replug": {
+    "date": "2026-09-29",
+    "firmware_commit": "4f415d8ea573e39138cc88aed167a92b5321c3f2",
+    "method": "User-operated unplug/replug with the final firmware; fault injection disabled",
+    "observed_reenumeration_cycles": 2,
+    "all_cycles_auto_authenticated": true,
+    "all_cycles_reacquired_dhcp": true,
+    "enumeration_to_dhcp_ms": [
+      10162,
+      9948
+    ],
+    "recovery_frequencies_mhz": [
+      5220,
+      5260
+    ],
+    "board_reboot_during_captured_recoveries": false,
+    "same_boot_gateway_probe": null,
+    "limits": "Two recoveries captured; host serial disconnected afterwards. Gateway verification after a separate diagnostic restart is not attributed to these hotplug cycles. Long-duration hotplug and unplug while STOPPED remain unverified."
+  }
 }
