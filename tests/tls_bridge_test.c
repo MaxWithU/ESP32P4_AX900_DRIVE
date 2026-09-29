@@ -7,8 +7,11 @@
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/pk.h"
 #include "mbedtls/platform_util.h"
+#include "mbedtls/platform_time.h"
 #include "mbedtls/esp_mbedtls_random.h"
 #include <assert.h>
+static mbedtls_time_t test_now;
+static mbedtls_time_t test_time(mbedtls_time_t *out){if(out)*out=test_now;return test_now;}
 
 void *os_zalloc(size_t n) { return calloc(1,n); }
 void *os_memdup(const void *p,size_t n) { void *out=malloc(n); if(out)memcpy(out,p,n); return out; }
@@ -109,11 +112,28 @@ static void run(const unsigned char *cert,size_t cert_len,const char *cert_path,
     wpabuf_free(s.input);wpabuf_free(s.output);
 }
 int main(int argc,char **argv) {
-    assert(argc==4);size_t len,other_len;unsigned char *cert=load(argv[1],&len),*other=load(argv[3],&other_len);
+    assert(argc==6);size_t len,other_len;unsigned char *cert=load(argv[1],&len),*other=load(argv[3],&other_len);
+    test_now=time(NULL);assert(mbedtls_platform_set_time(test_time)==0);
+    struct tls_connection_params p={.ca_cert_blob=cert,.ca_cert_blob_len=len,.domain_match="radius.test"};
+    void *ctx=tls_init(NULL);struct tls_connection *c=tls_connection_init(ctx);assert(c);
+    mbedtls_time_t saved=test_now;test_now=0;
+    assert(tls_connection_set_params(ctx,c,&p)==-1);tls_connection_deinit(ctx,c);test_now=saved;
+#if defined(MBEDTLS_HAVE_TIME_DATE)
+    c=tls_connection_init(ctx);assert(tls_connection_set_params(ctx,c,&p)==0);
+    test_now=0;assert(tls_connection_handshake(ctx,c,NULL,NULL)==NULL && tls_connection_get_failed(ctx,c));
+    tls_connection_deinit(ctx,c);test_now=saved;
     run(cert,len,argv[1],argv[2],"radius.test",true,true);
     run(cert,len,argv[1],argv[2],"wrong.test",true,false);
     run(other,other_len,argv[1],argv[2],"radius.test",true,false);
+    run(cert,len,argv[4],argv[2],"radius.test",true,false); // expired, trusted issuer/name
+    run(cert,len,argv[5],argv[2],"radius.test",true,false); // not yet valid
+#else
+    c=tls_connection_init(ctx);assert(tls_connection_set_params(ctx,c,&p)==-1);
+    tls_connection_deinit(ctx,c);
+#endif
+    tls_deinit(ctx);
     run(cert,len,argv[1],argv[2],NULL,false,true);
+    test_now=0;run(cert,len,argv[1],argv[2],NULL,false,true);
     free(cert);free(other);
-    puts("TLS bridge: fragmented handshake, exporter, bidirectional data, wrong-name/untrusted-CA rejection and explicit no-validation mode passed");
+    puts("TLS bridge: configured date policy, unset/reset clock rejection and explicit no-validation mode passed");
 }

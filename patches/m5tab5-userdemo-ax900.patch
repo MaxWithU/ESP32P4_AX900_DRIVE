@@ -1006,9 +1006,33 @@ new file mode 100644
 diff --git a/platforms/tab5/sdkconfig.defaults b/platforms/tab5/sdkconfig.defaults
 --- a/platforms/tab5/sdkconfig.defaults
 +++ b/platforms/tab5/sdkconfig.defaults
-@@ -42,3 +42,5 @@
+@@ -42,3 +42,8 @@
  CONFIG_LV_USE_FONT_COMPRESSED=y
  CONFIG_LV_USE_DEMO_BENCHMARK=y
  CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 +CONFIG_LV_USE_SNAPSHOT=y
 +CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
++CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF=y
++CONFIG_MBEDTLS_HAVE_TIME=y
++CONFIG_MBEDTLS_HAVE_TIME_DATE=y
+diff --git a/platforms/tab5/sdkconfig b/platforms/tab5/sdkconfig
+--- a/platforms/tab5/sdkconfig
++++ b/platforms/tab5/sdkconfig
+@@ -1264,7 +1264,7 @@
+ # CONFIG_ESP_NETIF_RECEIVE_REPORT_ERRORS is not set
+ # CONFIG_ESP_NETIF_L2_TAP is not set
+ # CONFIG_ESP_NETIF_BRIDGE_EN is not set
+-# CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF is not set
++CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF=y
+ # end of ESP NETIF Adapter
+
+ #
+@@ -1931,7 +1931,7 @@
+ # CONFIG_MBEDTLS_ATCA_HW_ECDSA_VERIFY is not set
+ CONFIG_MBEDTLS_HAVE_TIME=y
+ # CONFIG_MBEDTLS_PLATFORM_TIME_ALT is not set
+-# CONFIG_MBEDTLS_HAVE_TIME_DATE is not set
++CONFIG_MBEDTLS_HAVE_TIME_DATE=y
+ CONFIG_MBEDTLS_ECDSA_DETERMINISTIC=y
+ CONFIG_MBEDTLS_SHA1_C=y
+ CONFIG_MBEDTLS_SHA512_C=y

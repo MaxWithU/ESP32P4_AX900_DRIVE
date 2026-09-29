@@ -9,6 +9,7 @@
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/esp_mbedtls_random.h"
 #include "mbedtls/platform_util.h"
+#include "mbedtls/platform_time.h"
 #include "esp_log.h"
 
 #define TLS_BUFFER_LIMIT 65536
@@ -18,10 +19,21 @@ struct tls_connection {
     mbedtls_x509_crt ca;
     struct wpabuf *input, *output;
     size_t input_offset;
-    bool configured, failed, exported;
+    bool configured, failed, exported, verified;
     u8 master[48], random[64];
     mbedtls_tls_prf_types prf;
 };
+
+static bool verification_time_ready(void)
+{
+#if defined(MBEDTLS_HAVE_TIME) && defined(MBEDTLS_HAVE_TIME_DATE)
+    // Detect an unset/reset clock. The application must set accurate UTC from a
+    // trusted RTC or other trusted source before attempting verified PEAP.
+    return mbedtls_time(NULL) >= 1577836800; // 2020-01-01 UTC
+#else
+    return false;
+#endif
+}
 
 static int record_write(void *ctx, const unsigned char *buf, size_t len)
 {
@@ -108,10 +120,15 @@ int tls_connection_set_params(void *ctx, struct tls_connection *c, const struct 
     mbedtls_ssl_conf_rng(&c->conf, mbedtls_esp_random, NULL);
     // The public AX900 API rejects missing trust material unless explicitly opted out.
     if (p->ca_cert_blob) {
+        if (!verification_time_ready()) {
+            ESP_LOGW("AX900", "Verified PEAP requires certificate date checks and a set system clock");
+            return -1;
+        }
         if (!p->domain_match || !p->domain_match[0] ||
             mbedtls_x509_crt_parse(&c->ca, p->ca_cert_blob, p->ca_cert_blob_len) != 0) return -1;
         mbedtls_ssl_conf_ca_chain(&c->conf, &c->ca, NULL);
         mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+        c->verified = true;
     } else mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_NONE);
 #if defined(MBEDTLS_SSL_SESSION_TICKETS)
     mbedtls_ssl_conf_session_tickets(&c->conf, MBEDTLS_SSL_SESSION_TICKETS_DISABLED);
@@ -149,6 +166,7 @@ struct wpabuf *tls_connection_handshake(void *ctx, struct tls_connection *c,
 {
     if (application) *application = NULL;
     if (!c || !c->configured || feed(c, input)) return NULL;
+    if (c->verified && !verification_time_ready()) { c->failed = true; return NULL; }
     int ret = mbedtls_ssl_handshake(&c->ssl);
     if (ret && ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
         c->failed = true;

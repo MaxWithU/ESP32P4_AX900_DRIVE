@@ -2,6 +2,7 @@
 #include "ax900_test.h"
 #include "ax900.h"
 #include "ax900_dns.h"
+#include "ax900_netif_dns.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_random.h"
@@ -71,6 +72,37 @@ static bool receive_all(struct test *t,int fd,void *data,size_t n){
         return false;
     }return n==0;
 }
+static bool http_line(struct test *t,int fd,char *line,size_t capacity,size_t *budget){
+    size_t used=0;
+    while(used<capacity-1 && *budget){
+        if(!receive_all(t,fd,line+used,1))return false;
+        --*budget;
+        if(line[used++]=='\n'){
+            line[used]=0;
+            return used>=2 && line[used-2]=='\r';
+        }
+    }
+    t->result.error=ESP_ERR_INVALID_RESPONSE;return false;
+}
+static bool http_response(struct test *t,int fd){
+    char line[512];size_t budget=8192;
+    t->result.stage=AX900_TEST_STAGE_RESPONSE;
+    // Informational responses have their own header section. Only a final
+    // response establishes success; cap bytes and count as well as elapsed time.
+    for(unsigned interim=0;interim<=8;interim++){
+        if(!http_line(t,fd,line,sizeof(line),&budget))return false;
+        size_t n=strlen(line);
+        if(n<14 || memcmp(line,"HTTP/1.",7) || (line[7]!='0' && line[7]!='1') ||
+           line[8]!=' ' || line[9]<'1' || line[9]>'5' || line[10]<'0' || line[10]>'9' ||
+           line[11]<'0' || line[11]>'9' || (line[12]!=' ' && line[12]!='\r'))break;
+        unsigned status=(line[9]-'0')*100+(line[10]-'0')*10+line[11]-'0';
+        if(status>=200){t->result.http_status=status;return status<400;}
+        // No protocol upgrade was requested, so 101 cannot complete this GET.
+        if(status==101)break;
+        do{if(!http_line(t,fd,line,sizeof(line),&budget))return false;}while(strcmp(line,"\r\n"));
+    }
+    t->result.error=ESP_ERR_INVALID_RESPONSE;return false;
+}
 static bool resolve(struct test *t,uint32_t *address){
     if(t->config.kind!=AX900_TEST_DNS && inet_pton(AF_INET,t->config.host,address)==1)return true;
     t->result.stage=AX900_TEST_STAGE_DNS;
@@ -104,15 +136,7 @@ static bool run_test(struct test *t){
     if(t->config.kind==AX900_TEST_HTTP){
         char request[512];int n=snprintf(request,sizeof(request),"GET %s HTTP/1.1\r\nHost: %s:%u\r\nConnection: close\r\n\r\n",t->config.path,t->config.host,t->config.port);
         if(n<0 || n>=sizeof(request) || !send_all(t,fd,request,n))goto done;
-        char line[128];size_t used=0;
-        while(used<sizeof(line)-1 && receive_all(t,fd,line+used,1)){if(line[used++]=='\n')break;}
-        line[used]=0;t->result.stage=AX900_TEST_STAGE_RESPONSE;
-        if(used>=13 && line[used-1]=='\n' && !memcmp(line,"HTTP/1.",7) &&
-           (line[7]=='0' || line[7]=='1') && line[8]==' ' && line[9]>='1' && line[9]<='5' &&
-           line[10]>='0' && line[10]<='9' && line[11]>='0' && line[11]<='9' && (line[12]==' ' || line[12]=='\r')){
-            t->result.http_status=(line[9]-'0')*100+(line[10]-'0')*10+line[11]-'0';
-            ok=t->result.http_status<400;
-        }
+        ok=http_response(t,fd);
     }else if(t->config.kind==AX900_TEST_UDP){
         uint8_t packet[1200],reply[1200];memset(packet,0xa5,sizeof(packet));memcpy(packet,"AX9P",4);
         uint32_t nonce=esp_random();memcpy(packet+4,&nonce,4);uint64_t sum=0;
@@ -204,7 +228,14 @@ esp_err_t ax900_test_start(const ax900_test_config_t *config){
     struct test *t=calloc(1,sizeof(*t));if(!t)return start_failed(ESP_ERR_NO_MEM);
     t->config=*config;t->index=esp_netif_get_netif_impl_index(netif);t->source=ip.ip.addr;
     if(config->dns_ipv4[0]){if(inet_pton(AF_INET,config->dns_ipv4,&t->dns)!=1){free(t);return start_failed(ESP_ERR_INVALID_ARG);}}
-    else{esp_netif_dns_info_t dns={0};if(esp_netif_get_dns_info(netif,ESP_NETIF_DNS_MAIN,&dns)==ESP_OK && dns.ip.type==ESP_IPADDR_TYPE_V4)t->dns=dns.ip.u_addr.ip4.addr;}
+    else{
+        esp_netif_dns_info_t dns={0};esp_err_t e=ax_netif_get_dns(netif,&dns);
+        if(e==ESP_OK && dns.ip.type==ESP_IPADDR_TYPE_V4)t->dns=dns.ip.u_addr.ip4.addr;
+        uint32_t literal;
+        if((config->kind==AX900_TEST_DNS || inet_pton(AF_INET,config->host,&literal)!=1) && !t->dns){
+            free(t);return start_failed(e==ESP_OK?ESP_ERR_NOT_FOUND:e);
+        }
+    }
     t->result=(ax900_test_result_t){.state=AX900_TEST_RUNNING,.kind=config->kind,.connection_id=link.connection_id};
     if(t->index<=0 || !t->source || !ax900_connection_is_current(link.connection_id)){free(t);return start_failed(ESP_ERR_INVALID_STATE);}
     taskENTER_CRITICAL(&test_lock);published=t->result;taskEXIT_CRITICAL(&test_lock);

@@ -21,7 +21,11 @@ python3 tools/benchmark_peer.py --bind <LAN_IP> --port 5201
 python3 tools/benchmark_device.py --host <LAN_IP> --rounds 3 --label local-benchmark
 ```
 
-DNS/TCP/HTTP/上传/下载/UDP 由 `ax900_test.h` 暴露，目标、端口、DNS、路径仅存 RAM。每次测试总时限 1–60 秒，吞吐数据 1 KiB–8 MiB。上传只有收到对端实际字节数确认才算成功，下载验证合成内容；超时结果不能当作完整吞吐。UDP 是 100 个 1200 字节包的往返回复率，不能当作单向丢包率。内部 RAM 最低值为启动以来的历史最低值，不是单次测试独占的最低值。DNS 使用 AX900 的 UDP socket，所有模式同时绑定接口及源地址。HTTP 只验证状态行，非网页内容/HTTPS 检测。
+DNS/TCP/HTTP/上传/下载/UDP 由 `ax900_test.h` 暴露，目标、端口、DNS、路径仅存 RAM。每次测试总时限 1–60 秒，吞吐数据 1 KiB–8 MiB。上传只有收到对端实际字节数确认才算成功，下载验证合成内容；超时结果不能当作完整吞吐。UDP 是 100 个 1200 字节包的往返回复率，不能当作单向丢包率。内部 RAM 最低值为启动以来的历史最低值，不是单次测试独占的最低值。DNS 使用 AX900 的 UDP socket，所有模式同时绑定接口及源地址。
+
+自动 DNS 要求 `CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF=y`，避免内置 Wi-Fi 的 DHCP 替换全局 DNS 后影响 AX900 测试。自定义集成缺少该选项时不读取全局 DNS，须显式填写 DNS IPv4 才能测试域名；字面 IPv4 目标不受影响。
+
+HTTP 检查最终状态行，跳过最多 8 个 1xx 响应及其头部；最终 2xx/3xx 通过，4xx/5xx 失败，未请求的 101 协议升级也失败。读取受总时限、8 KiB 总头部预算及 511 字节单行上限约束，不验证网页内容或 HTTPS。网关 Ping 则为每个请求设置 1500 ms 单调时钟总截止时间，无关 ICMP 不延长等待；停止检查间隔最多 100 ms 加调度延迟。
 
 比较优化前后必须使用同一网络、电脑对端和测试大小；记录 AP/无线环境变化可能带来的偏差。原始串口、构建、烧录和测试明细只放本地忽略目录 `logs/`；仓库仅记录脱敏结论。
 

@@ -31,7 +31,9 @@ with tempfile.TemporaryDirectory(prefix='ax900-regression-') as folder:
     host('profile', ['tests/profile_test.c', 'components/ax900/ax900_profile.c'], ['tests/profile_host', 'tests/probe_host', 'components/ax900/include', 'components/ax900'])
     host('secure_profile', includes=['tests/secure_profile_host', 'tests/recovery_host', 'tests/profile_host', 'tests/probe_host', 'components/ax900/include', 'components/ax900'], defines=['-DESP_PLATFORM'])
     host('probe', ['tests/probe_test.c', 'components/ax900/ax900_probe.c'])
-    host('net_test', includes=['tests/net_test_host', 'tests/recovery_host', 'tests/probe_host', 'components/ax900/include', 'components/ax900'], defines=['-Wno-sign-compare'])
+    host('ping', includes=['tests/ping_host', 'tests/recovery_host', 'tests/probe_host', 'components/ax900/include', 'components/ax900'])
+    for per_interface in [0,1]:
+        host('net_test' if per_interface else 'net_test_global_dns', files=['tests/net_test_test.c'], includes=['tests/net_test_host', 'tests/recovery_host', 'tests/probe_host', 'components/ax900/include', 'components/ax900'], defines=['-Wno-sign-compare', f'-DCONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF={per_interface}'])
     includes = ['tests/recovery_host', 'tests/profile_host', 'tests/probe_host', 'components/ax900/include', 'components/ax900']
     host('recovery', ['tests/recovery_test.c', 'components/ax900/ax900_metrics.c'], includes=includes)
     host('wifi_recovery', includes=includes)

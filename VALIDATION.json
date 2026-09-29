@@ -382,5 +382,43 @@
     "board_reboot_during_captured_recoveries": false,
     "same_boot_gateway_probe": null,
     "limits": "Two recoveries captured; host serial disconnected afterwards. Gateway verification after a separate diagnostic restart is not attributed to these hotplug cycles. Long-duration hotplug and unplug while STOPPED remain unverified."
+  },
+  "review_fixes_validation": {
+    "date": "2026-09-29",
+    "reviewed_baseline": "ed74d48898966ca10629aee4d57da5a69999b465",
+    "fixed_findings": [
+      "P1: validate actual IPv4 header length and complete ICMP header before reading reply identifiers",
+      "P1: verified PEAP requires compiled certificate date checks and a set clock; expired and future certificates fail",
+      "P2: ping uses a monotonic total deadline and bounded receive slices despite unrelated ICMP traffic",
+      "P2: use per-interface DHCP DNS; unsupported global-only configurations require an explicit DNS address for named targets",
+      "P2: HTTP skips bounded informational responses and evaluates the final status; unsupported 101 is rejected"
+    ],
+    "host_regression": {
+      "result": "19 suites passed",
+      "sanitizers": "AddressSanitizer and UndefinedBehaviorSanitizer on host test programs",
+      "ping": "Full production ping source with synthetic socket/clock: all IPv4 IHL values and capture lengths through 68 bytes, reply/source/type filtering, continuous unrelated traffic, timeout and cancellation",
+      "tls": "Real mbedTLS handshakes with date checks enabled; expired/future certificate rejection, unset/reset clock, wrong name/CA and explicit unverified mode. Separate mbedTLS build with date checks disabled rejects verified mode.",
+      "dns": "Both per-interface and global-only compile configurations exercised; no global DNS read in the unsupported branch; explicit override and literal IPv4 tests pass",
+      "http": "103 then 500 fails; 100/103 then 204 passes; interim-only, malformed, truncated and excessive interim responses fail"
+    },
+    "builds": {
+      "standalone": {
+        "result": "passed",
+        "bytes": 1051104,
+        "sha256": "f003d56c5600c93dd61203fa045ef086a7e7faf94c556c0dfe8d8ea8d10dd770",
+        "dns_per_interface": true,
+        "mbedtls_certificate_dates": true
+      },
+      "official": {
+        "result": "passed",
+        "bytes": 6455568,
+        "sha256": "aee19d98ba7014a547e5d485c8ad4c263cf7547bf146be6bd44b3b27b14e184e",
+        "dns_per_interface": true,
+        "mbedtls_certificate_dates": true
+      }
+    },
+    "official_patch": "Applies to pinned official baseline; 13 source/CMake files match the integration checkout; checked-in sdkconfig and defaults both enable per-interface DNS and certificate dates",
+    "hardware": "Not flashed or tested on hardware in this revision. Earlier hardware measurements and installed image hashes in this document refer to the pre-review firmware.",
+    "logs": "All raw build/test logs and generated certificates remain local and excluded from Git; only this sanitized conclusion is published."
   }
 }

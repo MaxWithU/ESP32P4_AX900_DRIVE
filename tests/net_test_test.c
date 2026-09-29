@@ -18,6 +18,7 @@ static bool online=true,fail_task,fail_bind,timeout_peer;
 static uint32_t epoch=1;
 static int64_t clock_us;
 static int opens,closes,bound_device,bound_source;
+static int dns_reads;
 static void (*worker)(void *);static void *worker_arg;
 static const char *response;static size_t response_at;
 static int fake_socket(int domain,int type,int protocol){assert(domain==AF_INET && (type==SOCK_STREAM || type==SOCK_DGRAM) && !protocol);opens++;return 9;}
@@ -54,7 +55,7 @@ static esp_netif_t iface;
 esp_netif_t *esp_netif_get_handle_from_ifkey(const char *key){assert(online && !strcmp(key,"AX900"));return &iface;}
 esp_err_t esp_netif_get_ip_info(esp_netif_t *n,esp_netif_ip_info_t *ip){assert(n==&iface);memset(ip,0,sizeof(*ip));ip->ip.addr=htonl(0xc0000201);return ESP_OK;}
 int esp_netif_get_netif_impl_index(esp_netif_t *n){assert(n==&iface);return 7;}
-esp_err_t esp_netif_get_dns_info(esp_netif_t *n,int type,esp_netif_dns_info_t *out){assert(n==&iface && !type);memset(out,0,sizeof(*out));out->ip.u_addr.ip4.addr=htonl(0xc0000235);return ESP_OK;}
+esp_err_t esp_netif_get_dns_info(esp_netif_t *n,int type,esp_netif_dns_info_t *out){assert(n==&iface && !type);dns_reads++;memset(out,0,sizeof(*out));out->ip.u_addr.ip4.addr=htonl(CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF?0xc0000235:0xc6336435);return ESP_OK;}
 static ax900_test_result_t result(void){ax900_test_result_t r;ax900_test_get_result(&r);return r;}
 static void finish(void){assert(worker);worker(worker_arg);worker=NULL;assert(opens==closes);}
 int main(void){
@@ -68,6 +69,16 @@ int main(void){
     fail_task=true;assert(ax900_test_start(&c)==ESP_ERR_NO_MEM);fail_task=false;
     assert(ax900_test_start(&c)==ESP_OK);assert(ax900_test_start(&c)==ESP_ERR_INVALID_STATE);finish();
     assert(result().state==AX900_TEST_PASSED && bound_device==1 && bound_source==1);
+    ax900_test_config_t named=c;strcpy(named.host,"peer.test");
+#if CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF
+    assert(ax900_test_start(&named)==ESP_OK);
+    assert(((struct test *)worker_arg)->dns==htonl(0xc0000235) && dns_reads>0);
+    ax900_test_cancel();finish();
+#else
+    assert(ax900_test_start(&named)==ESP_ERR_NOT_SUPPORTED && dns_reads==0);
+#endif
+    strcpy(named.dns_ipv4,"203.0.113.53");assert(ax900_test_start(&named)==ESP_OK);
+    assert(((struct test *)worker_arg)->dns==htonl(0xcb007135));ax900_test_cancel();finish();
     assert(ax900_test_start(&c)==ESP_OK);ax900_test_cancel();finish();assert(result().state==AX900_TEST_CANCELLED);
     assert(ax900_test_start(&c)==ESP_OK);epoch++;finish();assert(result().state==AX900_TEST_STALE);
     fail_bind=true;assert(ax900_test_start(&c)==ESP_OK);finish();assert(result().state==AX900_TEST_FAILED);fail_bind=false;
@@ -76,6 +87,18 @@ int main(void){
     assert(ax900_test_start(&c)==ESP_OK);finish();assert(result().state==AX900_TEST_PASSED && result().http_status==204);
     response="HTTP/1.1 500 Error\r\n";response_at=0;
     assert(ax900_test_start(&c)==ESP_OK);finish();assert(result().state==AX900_TEST_FAILED && result().http_status==500);
+    response="HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\nHTTP/1.1 500 Error\r\n";response_at=0;
+    assert(ax900_test_start(&c)==ESP_OK);finish();assert(result().state==AX900_TEST_FAILED && result().http_status==500);
+    response="HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 204 No Content\r\n";response_at=0;
+    assert(ax900_test_start(&c)==ESP_OK);finish();assert(result().state==AX900_TEST_PASSED && result().http_status==204);
+    const char *incomplete[]={"HTTP/1.1 103 Early Hints\r\n\r\n", "HTTP/1.1 103 Early Hints\r\nX: unfinished", "HTTP/1.1 101 Switching Protocols\r\n\r\n", "HTTP/1.1 200 OK\n"};
+    for(size_t i=0;i<sizeof(incomplete)/sizeof(incomplete[0]);i++){
+        response=incomplete[i];response_at=0;assert(ax900_test_start(&c)==ESP_OK);finish();assert(result().state==AX900_TEST_FAILED && !result().http_status);
+    }
+    char excessive[1024]="";
+    for(unsigned i=0;i<10;i++)strcat(excessive,"HTTP/1.1 103 Early Hints\r\n\r\n");
+    strcat(excessive,"HTTP/1.1 204 No Content\r\n");response=excessive;response_at=0;
+    assert(ax900_test_start(&c)==ESP_OK);finish();assert(result().state==AX900_TEST_FAILED && !result().http_status);
     response="HTTP/1.1 2000 Bogus\r\n";response_at=0;
     assert(ax900_test_start(&c)==ESP_OK);finish();assert(result().state==AX900_TEST_FAILED && !result().http_status);
     response="HTTP/1.1 200 OK";response_at=0;

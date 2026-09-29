@@ -22,6 +22,9 @@
 
 #include <stdlib.h>
 #include <stdbool.h>
+#include <stdatomic.h>
+#include <errno.h>
+#include "esp_timer.h"
 #include <sys/time.h>
 #include <net/if.h>
 #include "freertos/FreeRTOS.h"
@@ -52,7 +55,7 @@ const static char *TAG = "ping_sock";
 #define PING_FLAGS_INIT (1 << 0)
 #define PING_FLAGS_START (1 << 1)
 
-#define IP_ICMP_HDR_SIZE (64)   // 64 bytes are enough to cover IP header and ICMP header
+#define IP_ICMP_HDR_SIZE (68)   // Maximum IPv4 header (60) plus complete echo header (8).
 
 typedef struct {
     int sock;
@@ -66,11 +69,12 @@ typedef struct {
     uint32_t transmitted;
     uint32_t received;
     uint32_t interval_ms;
+    uint32_t timeout_ms;
     uint32_t elapsed_time_ms;
     uint32_t total_time_ms;
     uint8_t ttl;
     uint8_t tos;
-    uint32_t flags;
+    atomic_uint flags;
     void (*on_ping_success)(esp_ping_handle_t hdl, void *args);
     void (*on_ping_timeout)(esp_ping_handle_t hdl, void *args);
     void (*on_ping_end)(esp_ping_handle_t hdl, void *args);
@@ -105,21 +109,55 @@ static esp_err_t esp_ping_send(esp_ping_t *ep)
 static int esp_ping_receive(esp_ping_t *ep)
 {
     char buf[IP_ICMP_HDR_SIZE];
-    int len = 0;
+    int len;
     struct sockaddr_storage from;
-    int fromlen = sizeof(from);
-    uint16_t data_head = 0;
     ip_addr_t recv_addr;
-    ip_addr_copy(recv_addr, *IP_ADDR_ANY);
+    const int64_t deadline = esp_timer_get_time() + (int64_t)ep->timeout_ms * 1000;
 
-    while ((len = recvfrom(ep->sock, buf, sizeof(buf), 0, (struct sockaddr *)&from, (socklen_t *)&fromlen)) > 0) {
+    while ((ep->flags & (PING_FLAGS_INIT | PING_FLAGS_START)) == (PING_FLAGS_INIT | PING_FLAGS_START)) {
+        // A stream of unrelated ICMP must not restart the timeout on each recv.
+        int64_t left = deadline - esp_timer_get_time();
+        if (left <= 0) break;
+        // Short slices also bound cancellation latency when no packets arrive.
+        if (left > 100000) left = 100000;
+        struct timeval timeout = {.tv_sec = 0, .tv_usec = left};
+        if (setsockopt(ep->sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout))) return -1;
+        socklen_t fromlen = sizeof(from);
+        len = recvfrom(ep->sock, buf, sizeof(buf), 0, (struct sockaddr *)&from, &fromlen);
+        if (esp_timer_get_time() >= deadline ||
+            (ep->flags & (PING_FLAGS_INIT | PING_FLAGS_START)) != (PING_FLAGS_INIT | PING_FLAGS_START)) break;
+        if (len < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
+            return -1;
+        }
+        if (!len) continue;
+        uint16_t data_head;
+        ip_addr_copy(recv_addr, *IP_ADDR_ANY);
 #if CONFIG_LWIP_IPV4
         if (from.ss_family == AF_INET) {
             // IPv4
             struct sockaddr_in *from4 = (struct sockaddr_in *)&from;
             inet_addr_to_ip4addr(ip_2_ip4(&recv_addr), &from4->sin_addr);
             IP_SET_TYPE_VAL(recv_addr, IPADDR_TYPE_V4);
-            data_head = (uint16_t)(sizeof(struct ip_hdr) + sizeof(struct icmp_echo_hdr));
+            if (len < (int)sizeof(struct ip_hdr)) continue;
+            const struct ip_hdr *iphdr = (const struct ip_hdr *)buf;
+            unsigned header_len = IPH_HL_BYTES(iphdr);
+            data_head = header_len + sizeof(struct icmp_echo_hdr);
+            if (IPH_V(iphdr) != 4 || header_len < sizeof(struct ip_hdr) ||
+                len < data_head || lwip_ntohs(IPH_LEN(iphdr)) < data_head ||
+                IPH_PROTO(iphdr) != IP_PROTO_ICMP) continue;
+            const struct sockaddr_in *target = (const struct sockaddr_in *)&ep->target_addr;
+            if (ep->target_addr.ss_family != AF_INET || from4->sin_addr.s_addr != target->sin_addr.s_addr) continue;
+            const struct icmp_echo_hdr *iecho = (const struct icmp_echo_hdr *)(buf + header_len);
+            if (iecho->type == ICMP_ER && !iecho->code &&
+                iecho->id == ep->packet_hdr->id && iecho->seqno == ep->packet_hdr->seqno) {
+                ip_addr_copy(ep->recv_addr, recv_addr);
+                ep->received++;
+                ep->ttl = IPH_TTL(iphdr);
+                ep->tos = IPH_TOS(iphdr);
+                ep->recv_len = lwip_ntohs(IPH_LEN(iphdr)) - data_head;
+                return len;
+            }
         }
 #endif
 #if CONFIG_LWIP_IPV6
@@ -129,41 +167,23 @@ static int esp_ping_receive(esp_ping_t *ep)
             inet6_addr_to_ip6addr(ip_2_ip6(&recv_addr), &from6->sin6_addr);
             IP_SET_TYPE_VAL(recv_addr, IPADDR_TYPE_V6);
             data_head = (uint16_t)(sizeof(struct ip6_hdr) + sizeof(struct icmp6_echo_hdr));
-        }
-#endif
-        if (len >= data_head) {
-#if CONFIG_LWIP_IPV4
-            if (IP_IS_V4_VAL(recv_addr)) {              // Currently we process IPv4
-                struct ip_hdr *iphdr = (struct ip_hdr *)buf;
-                struct icmp_echo_hdr *iecho = (struct icmp_echo_hdr *)(buf + (IPH_HL_BYTES(iphdr)));
-                if ((iecho->id == ep->packet_hdr->id) && (iecho->seqno == ep->packet_hdr->seqno)) {
-                    ip_addr_copy(ep->recv_addr, recv_addr);
-                    ep->received++;
-                    ep->ttl = IPH_TTL(iphdr);
-                    ep->tos = IPH_TOS(iphdr);
-                    ep->recv_len = lwip_ntohs(IPH_LEN(iphdr)) - data_head;  // The data portion of ICMP
-                    return len;
-                }
-            }
-#endif // CONFIG_LWIP_IPV4
-#if CONFIG_LWIP_IPV6
-            if (IP_IS_V6_VAL(recv_addr)) {      // Currently we process IPv6
+            if (len >= data_head) {
                 struct ip6_hdr *iphdr = (struct ip6_hdr *)buf;
                 struct icmp6_echo_hdr *iecho6 = (struct icmp6_echo_hdr *)(buf + sizeof(struct ip6_hdr)); // IPv6 head length is 40
                 if ((iecho6->type == ICMP6_TYPE_EREP) // only check the ICMPv6 echo reply types
                     && (iecho6->id == ep->packet_hdr->id) && (iecho6->seqno == ep->packet_hdr->seqno)) {
+                    uint16_t payload_len = lwip_ntohs(IP6H_PLEN(iphdr));
+                    if (payload_len < sizeof(struct icmp6_echo_hdr)) continue;
                     ip_addr_copy(ep->recv_addr, recv_addr);
                     ep->received++;
-                    ep->recv_len = IP6H_PLEN(iphdr) - sizeof(struct icmp6_echo_hdr); //The data portion of ICMPv6
+                    ep->recv_len = payload_len - sizeof(struct icmp6_echo_hdr);
                     return len;
                 }
             }
-#endif // CONFIG_LWIP_IPV6
         }
-        fromlen = sizeof(from);
+#endif // CONFIG_LWIP_IPV6
     }
-    // if timeout, len will be -1
-    return len;
+    return -1;
 }
 
 static void esp_ping_thread(void *args)
@@ -230,6 +250,7 @@ esp_err_t esp_ping_new_session(const esp_ping_config_t *config, const esp_ping_c
     esp_err_t ret = ESP_FAIL;
     esp_ping_t *ep = NULL;
     ESP_GOTO_ON_FALSE(config, ESP_ERR_INVALID_ARG, err, TAG, "ping config can't be null");
+    ESP_GOTO_ON_FALSE(config->timeout_ms, ESP_ERR_INVALID_ARG, err, TAG, "ping timeout can't be zero");
     ESP_GOTO_ON_FALSE(hdl_out, ESP_ERR_INVALID_ARG, err, TAG, "ping handle can't be null");
 
     ep = mem_calloc(1, sizeof(esp_ping_t));
@@ -254,6 +275,7 @@ esp_err_t esp_ping_new_session(const esp_ping_config_t *config, const esp_ping_c
     ep->recv_addr = config->target_addr;
     ep->count = config->count;
     ep->interval_ms = config->interval_ms;
+    ep->timeout_ms = config->timeout_ms;
     ep->icmp_pkt_size = sizeof(struct icmp_echo_hdr) + config->data_size;
     ep->packet_hdr = mem_calloc(1, ep->icmp_pkt_size);
     ESP_GOTO_ON_FALSE(ep->packet_hdr,ESP_ERR_NO_MEM, err, TAG, "no memory for echo packet");

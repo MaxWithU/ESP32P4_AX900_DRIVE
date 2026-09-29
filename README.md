@@ -50,6 +50,8 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 
 将 `components/ax900` 放入工程组件目录，或通过 `EXTRA_COMPONENT_DIRS` 引用。先获取其 `firmware/` 依赖，再构建。
 
+启用 `CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF=y`，使 DHCP DNS 按接口保存；缺少此配置时，驱动不显示全局 DNS，域名测试须显式指定 DNS IPv4，否则返回 `ESP_ERR_NOT_SUPPORTED`。IP 地址目标的测试仍可运行。本仓库默认配置与官方接入补丁已启用此选项。
+
 应用负责板级 USB 供电、安装 USB Host，以及调用 `usb_host_lib_handle_events()` 的 Host 事件任务。驱动只注册自己的 USB 客户端，可与已有 HID 客户端共用 Host。
 
 ```c
@@ -85,7 +87,9 @@ ax900_peap_config_t config = {
 esp_err_t result = ax900_connect_peap(&ap, &config);
 ```
 
-字符串会复制到驱动 RAM；认证并获得 DHCP 地址后，在设备 `ax900_wifi` NVS 命名空间保存最多 4 个网络的账号、密码和证书策略。失败尝试不会覆盖已保存配置，诊断关联不保存；断开后清除 RAM 中的连接请求。启动扫描后优先重连最近成功的网络，同名网络优先选 5 GHz。手动断开后保持断开；临时故障有限退避重试，认证失败暂停自动尝试。CA 校验还要求设备有正确时间。
+字符串会复制到驱动 RAM；认证并获得 DHCP 地址后，在设备 `ax900_wifi` NVS 命名空间保存最多 4 个网络的账号、密码和证书策略。失败尝试不会覆盖已保存配置，诊断关联不保存；断开后清除 RAM 中的连接请求。启动扫描后优先重连最近成功的网络，同名网络优先选 5 GHz。手动断开后保持断开；临时故障有限退避重试，认证失败暂停自动尝试。
+
+CA 校验要求 `CONFIG_MBEDTLS_HAVE_TIME=y` 和 `CONFIG_MBEDTLS_HAVE_TIME_DATE=y`，并由应用在连接前从可信 RTC 或其他可信来源设置准确 UTC；两套示例配置均已开启有效期检查。缺少编译选项或时钟早于 2020-01-01 时拒绝验证模式，不自动降级。该时间下限仅检测未设置的时钟，不能证明时间准确；驱动不自动联网校时。过期或尚未生效的证书由 mbedTLS 拒绝。
 
 `ax900_connect_saved(&ap)` 使用已保存配置连接，`ax900_has_saved(&ap)` 只返回是否已保存，`ax900_forget_saved()` 清除 AX900 保存记录。没有导出密码的接口。官方 NVS 默认未启用 Flash/NVS 加密，因此记录是设备本地持久存储，并非加密保险库；日志、快照和 Git 均不记录凭据。
 若用户明确选择不校验服务器，省略 CA/域名并显式设置 `allow_unverified_server=true`；这种模式无法验证服务器身份，账号信息可能被冒充热点窃取。官方示例窗口提供有明确标记的“不校验证书”选项；界面支持 SD 卡 `/sd/` 下的 PEM CA 文件（最多 8192 字节）和服务器 DNS 名；API 同样支持。
@@ -166,7 +170,7 @@ python3 tools/test_local.py \
   --mbedtls "$IDF_PATH/components/mbedtls/mbedtls"
 ```
 
-测试覆盖扫描分组、DNS、国家信道、包池、配置及受保护存储、测试 API、USB 生命周期、实体键盘、TLS 与真实 Hostap WPA2 握手；缺少可选依赖会明确显示 SKIP。独立固件和官方固件构建仍须分别执行。新增 API、性能测试步骤及验证边界见 [开发与测试说明](docs/driver-development.md)。
+测试覆盖扫描分组、DNS、国家信道、包池、配置及受保护存储、测试 API、生产 Ping 实现的报文边界/总超时、USB 生命周期、实体键盘、TLS 与真实 Hostap WPA2 握手；缺少可选依赖会明确显示 SKIP。DNS 配置开关和 TLS 有效期检查开关分别构建测试，HTTP 用例覆盖中间响应与最终失败响应。独立固件和官方固件构建仍须分别执行。新增 API、性能测试步骤及验证边界见 [开发与测试说明](docs/driver-development.md)。
 
 恢复测试直接编译生产 USB 工作任务，模拟 USB 主机的传输所有权，覆盖迟到回调、取消不归还、RX 错误/提交失败、初始化清理、重试上限、网络选择和用户取消：
 
@@ -245,7 +249,7 @@ TLS 桥接测试（本机需 CMake、C 编译器、OpenSSL 和 mbedTLS 3.6.x 源
 MBEDTLS_SOURCE="$IDF_PATH/components/mbedtls/mbedtls" sh tests/run_tls_test.sh
 ```
 
-测试与真实内存 TLS 服务端交换分片握手和双向应用数据，比较 EAP 密钥导出，并确认错误域名、不受信任 CA 会失败。临时证书和测试密钥仅在临时目录生成。它不替代完整 PEAP/MSCHAPv2、WPA2 或实机无线测试。
+测试与真实内存 TLS 服务端交换分片握手和双向应用数据，比较 EAP 密钥导出，并确认错误域名、不受信任 CA、过期和尚未生效的证书会失败；另验证时钟未设置/重置以及关闭有效期检查的构建会拒绝验证模式。临时证书和测试密钥仅在临时目录生成。它不替代完整 PEAP/MSCHAPv2、WPA2 或实机无线测试。
 
 ## 许可与来源
 

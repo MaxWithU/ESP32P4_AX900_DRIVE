@@ -3,6 +3,7 @@
 #include "aic8800_protocol.h"
 #include "ax900_rx.h"
 #include "esp_netif.h"
+#include "ax900_netif_dns.h"
 #include "esp_netif_defaults.h"
 #include "esp_event.h"
 #include "esp_timer.h"
@@ -85,7 +86,7 @@ static void ip_event(void *arg,esp_event_base_t base,int32_t id,void *data) {
         snprintf(addresses.ip,sizeof(addresses.ip),IPSTR,IP2STR(&event->ip_info.ip));
         snprintf(addresses.gateway,sizeof(addresses.gateway),IPSTR,IP2STR(&event->ip_info.gw));
         snprintf(addresses.netmask,sizeof(addresses.netmask),IPSTR,IP2STR(&event->ip_info.netmask));
-        if(esp_netif_get_dns_info(net.netif,ESP_NETIF_DNS_MAIN,&dns)==ESP_OK && dns.ip.type==ESP_IPADDR_TYPE_V4 && dns.ip.u_addr.ip4.addr)
+        if(ax_netif_get_dns(net.netif,&dns)==ESP_OK && dns.ip.type==ESP_IPADDR_TYPE_V4 && dns.ip.u_addr.ip4.addr)
             snprintf(addresses.dns,sizeof(addresses.dns),IPSTR,IP2STR(&dns.ip.u_addr.ip4));
         taskENTER_CRITICAL(&io_lock);
         bool accepted=net.authenticated;

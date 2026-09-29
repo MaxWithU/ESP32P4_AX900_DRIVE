@@ -43,6 +43,8 @@ idf.py -C platforms/tab5 -p /dev/cu.usbmodem1101 flash
 
 官方 `sdkconfig` 已启用 `CONFIG_LV_USE_SNAPSHOT=y`，补丁将此设置也加入 `sdkconfig.defaults`，以支持 `ax900 snapshot`；保留官方非阻塞 USB Serial/JTAG VFS 行为。串口命令和主机截图解码脚本见根目录 README。
 
+补丁同时在官方已跟踪的 `sdkconfig` 和 `sdkconfig.defaults` 启用按接口保存 DNS 与证书有效期检查。已有集成升级时请确认 `CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF=y`、`CONFIG_MBEDTLS_HAVE_TIME=y` 和 `CONFIG_MBEDTLS_HAVE_TIME_DATE=y`；只修改 defaults 不会覆盖旧 sdkconfig。启用 CA 校验前，应用还须设置准确 UTC，驱动不会自动校时或降级为不校验模式。
+
 切换至 **Connection test** 查看四个连接阶段、地址信息及数据收发计数。连接并取得 DHCP 地址后，点击 **Run test** 运行 5 次网关 Ping；测试过程会逐格更新延迟，结束后显示平均值和丢包率。未连接时按钮不可用，切换标签或关闭窗口不会访问已释放的界面对象。重新连接后需重新测试。
 
 串口 `ax900 test` 打开面板，`ax900 test-run` 通过同一个界面按钮触发测试，`ax900 test-status` 输出结果；底层 API 为 `ax900_probe_start()` / `ax900_probe_get_result()`，定义见 `ax900_probe.h`。
