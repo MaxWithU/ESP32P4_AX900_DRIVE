@@ -37,8 +37,8 @@ set(ax900_supplicant_sources
     "supplicant/src/crypto/aes-omac1.c"
 )
 
-idf_component_register(SRCS ${ax900_supplicant_sources} "ax900_tls.c" "ax900_net.c" "ax900_supplicant_port.c" "ax900_usb.c" "ax900_firmware.c" "ax900_wifi.c"
-    INCLUDE_DIRS "include" PRIV_INCLUDE_DIRS "." "supplicant/src" "supplicant/src/utils" REQUIRES usb esp_timer esp_netif esp_event esp_hw_support mbedtls
+idf_component_register(SRCS ${ax900_supplicant_sources} "ax900_ping.c" "ax900_profile.c" "ax900_probe.c" "ax900_tls.c" "ax900_net.c" "ax900_supplicant_port.c" "ax900_usb.c" "ax900_firmware.c" "ax900_wifi.c"
+    INCLUDE_DIRS "include" PRIV_INCLUDE_DIRS "." "supplicant/src" "supplicant/src/utils" "$ENV{IDF_PATH}/components/lwip" REQUIRES usb esp_timer esp_netif esp_event esp_hw_support mbedtls lwip nvs_flash
     EMBED_FILES "firmware/fw_adid_8800d80_u02.bin"
                 "firmware/fw_patch_8800d80_u02.bin"
                 "firmware/fw_patch_table_8800d80_u02.bin"

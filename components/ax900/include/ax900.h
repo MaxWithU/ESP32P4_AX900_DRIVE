@@ -32,10 +32,18 @@ typedef struct {
     char ip[16];
     uint32_t tx_packets, rx_packets, rx_dropped;
     uint16_t disconnect_reason;
+    uint32_t connection_id;
+    uint16_t connected_frequency;
+    uint8_t saved_networks;
+    bool credentials_saved;
+    esp_err_t profile_error;
 } ax900_status_t;
 void ax900_get_status(ax900_status_t *out);
+// True only while this connection still has an authenticated AX900 DHCP lease.
+bool ax900_connection_is_current(uint32_t connection_id);
 esp_err_t ax900_request_scan(void);
-// Queue connection to a scanned BSSID. Password is copied, never logged or persisted.
+// Queue connection to a scanned BSSID. Credentials are saved locally after DHCP succeeds.
+// No API exports stored passwords; failures never overwrite a working profile.
 // Supports open and WPA2-PSK/CCMP networks without mandatory PMF.
 esp_err_t ax900_connect(const ax900_ap_t *ap, const char *password);
 // All strings are copied. Trust validation requires a PEM CA and exact DNS name.
@@ -48,6 +56,10 @@ typedef struct {
     bool allow_unverified_server;
 } ax900_peap_config_t;
 esp_err_t ax900_connect_peap(const ax900_ap_t *ap, const ax900_peap_config_t *config);
+esp_err_t ax900_connect_saved(const ax900_ap_t *ap);
+bool ax900_has_saved(const ax900_ap_t *ap);
+// Forget all AX900 profiles; keep the current connection until explicitly disconnected.
+esp_err_t ax900_forget_saved(void);
 // Diagnostic association only: never sends credentials or opens the data port.
 // Automatically disconnects after 10 seconds.
 esp_err_t ax900_test_association(const ax900_ap_t *ap);

@@ -9,7 +9,7 @@ index 0636c52..a775492 100644
 +#ifdef ESP_PLATFORM
 +    _panels.push_back(std::make_unique<PanelAx900>());
 +#endif
- 
+
      for (auto& panel : _panels) {
          panel->init();
 diff --git a/app/apps/app_launcher/view/view.h b/app/apps/app_launcher/view/view.h
@@ -19,7 +19,7 @@ index 6684fe3..57ae00e 100644
 @@ -28,6 +28,18 @@ public:
      virtual void update(bool isStacked) = 0;
  };
- 
+
 +#ifdef ESP_PLATFORM
 +class PanelAx900 : public PanelBase {
 +public:
@@ -40,12 +40,12 @@ index bec522e..827b312 100644
 --- a/platforms/tab5/CMakeLists.txt
 +++ b/platforms/tab5/CMakeLists.txt
 @@ -8,6 +8,7 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
- 
+
  set(EXTRA_COMPONENT_DIRS 
      "../../dependencies"
 +    "../../../../tab5-ax900/components/ax900"
  ) 
- 
+
  project(m5stack_tab5)
 diff --git a/platforms/tab5/main/CMakeLists.txt b/platforms/tab5/main/CMakeLists.txt
 index 38a7e34..8b72e38 100644
@@ -54,7 +54,7 @@ index 38a7e34..8b72e38 100644
 @@ -14,6 +14,6 @@ file(GLOB_RECURSE MY_HAL_SRCS
      ./hal/*.cpp
  )
- 
+
 -idf_component_register(SRCS "app_main.cpp" ${APP_LAYER_SRCS} ${MY_HAL_SRCS}
 +idf_component_register(SRCS "app_main.cpp" "ax900_console.cpp" ${APP_LAYER_SRCS} ${MY_HAL_SRCS}
                      INCLUDE_DIRS "." ${APP_LAYER_INCS}
@@ -68,7 +68,7 @@ index a48f7bc..a40ec51 100644
  #include <freertos/FreeRTOS.h>
  #include <freertos/task.h>
 +extern void ax900_console_poll();
- 
+
  extern "C" void app_main(void)
  {
 @@ -24,6 +25,7 @@ extern "C" void app_main(void)
@@ -80,67 +80,80 @@ index a48f7bc..a40ec51 100644
      }
      app::Destroy();
 diff --git a/platforms/tab5/main/hal/hal_esp32.cpp b/platforms/tab5/main/hal/hal_esp32.cpp
-index dda5d57..e9f650b 100644
+index dda5d57..0f8b82c 100644
 --- a/platforms/tab5/main/hal/hal_esp32.cpp
 +++ b/platforms/tab5/main/hal/hal_esp32.cpp
-@@ -13,6 +13,7 @@ extern "C" {
+@@ -13,6 +13,8 @@ extern "C" {
  #include <freertos/task.h>
  #include <bsp/m5stack_tab5.h>
  #include <lv_demos.h>
 +#include <ax900.h>
- 
++#include "components/tab5_keyboard.h"
+
  extern esp_lcd_touch_handle_t _lcd_touch_handle;
- 
-@@ -112,7 +113,11 @@ void HalEsp32::init()
+
+@@ -112,10 +114,15 @@ void HalEsp32::init()
      // lv_indev_set_display(lvTouchpad, lvDisp);
- 
+
      mclog::tagInfo(_tag, "usb host init");
 +    setUsb5vEnable(false);
 +    delay(1000);
      bsp_usb_host_start(BSP_USB_HOST_POWER_MODE_USB_DEV, true);
 +    setUsb5vEnable(true);
 +    ESP_ERROR_CHECK(ax900_start());
- 
+
      mclog::tagInfo(_tag, "hid init");
      hid_init();
++    lvKeyboard=tab5_keyboard_init(lvDisp);
+
+     mclog::tagInfo(_tag, "rs485 init");
+     rs485_init();
 diff --git a/app/apps/app_launcher/view/panel_ax900.cpp b/app/apps/app_launcher/view/panel_ax900.cpp
 new file mode 100644
-index 0000000..d6138e2
 --- /dev/null
 +++ b/app/apps/app_launcher/view/panel_ax900.cpp
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,256 @@
 +// SPDX-License-Identifier: MIT
 +#ifdef ESP_PLATFORM
 +#include "view.h"
++#include "ax900_test_view.h"
 +#include <ax900.h>
 +#include <hal/hal.h>
 +#include <algorithm>
 +#include <cstdio>
 +#include <cstring>
++#include <hal/components/tab5_keyboard.h>
 +
 +using namespace launcher_view;
 +using namespace smooth_ui_toolkit::lvgl_cpp;
 +static bool openRequested=false;
++static bool testRequested=false,runRequested=false;
 +static char selectRequested[33]={0};
++static bool credentialDialogOpen=false;
++bool ax900_ui_can_snapshot(){return !credentialDialogOpen;}
 +void ax900_ui_request_select(const char *ssid) {snprintf(selectRequested,sizeof(selectRequested),"%s",ssid);openRequested=true;}
 +void ax900_ui_request_open() {openRequested=true;}
++void ax900_ui_request_test(bool run) {openRequested=true;testRequested=true;runRequested=run;}
 +
 +class Ax900Window : public ui::Window {
 +public:
 +    Ax900Window() {
 +        config.kfClosed={490,-320,180,44,0};
-+        config.kfOpened={0,0,1000,590,255};
++        config.kfOpened={0,0,1120,630,255};
 +        config.title="AX900 Wi-Fi   /   2.4 + 5 GHz";
 +        config.bgColor=0x18242B;config.closeBtn=true;config.clickBgClose=false;
 +    }
 +    void onOpen() override {
++        _group=lv_group_create();tab5_keyboard_set_group(_group);
 +        _status=std::make_unique<Label>(_window->get());
-+        _status->align(LV_ALIGN_TOP_LEFT,24,58);
++        _status->align(LV_ALIGN_TOP_LEFT,24,108);
++        lv_obj_set_width(_status->get(),640);lv_label_set_long_mode(_status->get(),LV_LABEL_LONG_DOT);
 +        _status->setTextFont(&lv_font_montserrat_18);
 +        _status->setTextColor(lv_color_hex(0xB5CFDD));
 +        _scan=std::make_unique<Container>(_window->get());
 +        _scan->setSize(135,46);_scan->align(LV_ALIGN_TOP_RIGHT,-26,50);
 +        _scan->setBgColor(lv_color_hex(0x247F9C));_scan->setBorderWidth(0);
++        _scan->setPadding(0,0,0,0);_scan->removeFlag(LV_OBJ_FLAG_SCROLLABLE);
 +        _scanLabel=std::make_unique<Label>(_scan->get());
 +        _scanLabel->align(LV_ALIGN_CENTER,0,0);_scanLabel->setText("Scan again");
 +        _scan->onClick().connect([this]{
@@ -148,11 +161,28 @@ index 0000000..d6138e2
 +            else ax900_request_scan();
 +        });
 +        _list=std::make_unique<Container>(_window->get());
-+        _list->align(LV_ALIGN_TOP_LEFT,24,116);_list->setSize(952,438);
++        _list->align(LV_ALIGN_TOP_LEFT,24,140);_list->setSize(1072,460);
 +        _list->setBgColor(lv_color_hex(0x111C22));_list->setBorderWidth(0);
 +        _list->setPadding(14,14,14,14);
 +        lv_obj_set_flex_flow(_list->get(),LV_FLEX_FLOW_COLUMN);
 +        lv_obj_set_scroll_dir(_list->get(),LV_DIR_VER);
++        for(unsigned i=0;i<2;i++) {
++            _tabs[i]=lv_button_create(_window->get());lv_obj_set_pos(_tabs[i],24+i*210,50);lv_obj_set_size(_tabs[i],200,44);
++            lv_obj_set_style_radius(_tabs[i],12,0);auto *text=lv_label_create(_tabs[i]);
++            lv_label_set_text(text,i?"Connection test":"Networks");lv_obj_center(text);
++            lv_obj_add_event_cb(_tabs[i],[](lv_event_t *e){
++                auto *self=static_cast<Ax900Window *>(lv_event_get_user_data(e));
++                self->showTest(lv_event_get_current_target(e)==self->_tabs[1]);
++            },LV_EVENT_CLICKED,this);
++        }
++        _testView=std::make_unique<Ax900TestView>(_window->get());showTest(false);
++        _memory=lv_label_create(_window->get());lv_obj_set_pos(_memory,680,111);
++        lv_obj_set_style_text_font(_memory,&lv_font_montserrat_14,0);
++        _forget=lv_button_create(_window->get());lv_obj_set_pos(_forget,766,50);lv_obj_set_size(_forget,154,46);
++        auto *forgetText=lv_label_create(_forget);lv_label_set_text(forgetText,"Forget saved");lv_obj_center(forgetText);
++        lv_obj_add_event_cb(_forget,[](lv_event_t *){ax900_forget_saved();},LV_EVENT_CLICKED,nullptr);
++        for(auto *tab:_tabs)lv_group_add_obj(_group,tab);
++        lv_group_add_obj(_group,_scan->get());lv_group_add_obj(_group,_forget);lv_group_add_obj(_group,_testView->runButton());
 +        _snapshot=std::make_unique<ax900_status_t>();
 +        _generation=UINT32_MAX;_count=SIZE_MAX;
 +        ax900_request_scan();refresh();
@@ -162,21 +192,39 @@ index 0000000..d6138e2
 +    }
 +    void onClose() override {
 +        closeDialog();
++        tab5_keyboard_set_group(nullptr);lv_group_delete(_group);_group=nullptr;
++        lv_obj_delete(_memory);lv_obj_delete(_forget);
++        _testView.reset();for(auto *tab:_tabs)lv_obj_delete(tab);
 +        _scanLabel.reset();_scan.reset();_status.reset();_list.reset();_snapshot.reset();
 +    }
 +private:
 +    std::unique_ptr<Label> _status,_scanLabel;
 +    std::unique_ptr<Container> _scan,_list;
 +    std::unique_ptr<ax900_status_t> _snapshot;
++    std::unique_ptr<Ax900TestView> _testView;
++    lv_obj_t *_tabs[2]={};
++    lv_obj_t *_memory=nullptr,*_forget=nullptr;
++    lv_group_t *_group=nullptr,*_dialogGroup=nullptr;
++    bool _showTest=false;
++    void showTest(bool show) {
++        _showTest=show;
++        if(show)lv_obj_add_flag(_list->get(),LV_OBJ_FLAG_HIDDEN);else lv_obj_remove_flag(_list->get(),LV_OBJ_FLAG_HIDDEN);
++        _testView->show(show);
++        for(unsigned i=0;i<2;i++)lv_obj_set_style_bg_color(_tabs[i],lv_color_hex((i==1)==show?0x247F9C:0x243743),0);
++    }
 +    lv_obj_t *_dialog=nullptr,*_password=nullptr,*_dialogStatus=nullptr,*_username=nullptr,*_unverified=nullptr;
 +    ax900_ap_t _selected={};
 +    void closeDialog() {
++        if(_dialogGroup){tab5_keyboard_set_group(_group);lv_group_delete(_dialogGroup);_dialogGroup=nullptr;}
 +        if(_dialog){if(_password)lv_textarea_set_text(_password,"");if(_username)lv_textarea_set_text(_username,"");lv_obj_delete(_dialog);}
++        credentialDialogOpen=false;
 +        _dialog=nullptr;_password=nullptr;_dialogStatus=nullptr;_username=nullptr;_unverified=nullptr;
 +    }
 +    void select(size_t index) {
 +        if(!_snapshot || _snapshot->scanning || index>=_snapshot->ap_count || _dialog)return;
 +        _selected=_snapshot->aps[index];
++        credentialDialogOpen=true;
++        _dialogGroup=lv_group_create();tab5_keyboard_set_group(_dialogGroup);
 +        _dialog=lv_obj_create(lv_screen_active());lv_obj_set_size(_dialog,1080,640);lv_obj_center(_dialog);
 +        lv_obj_set_style_bg_color(_dialog,lv_color_hex(0x18242B),0);
 +        auto *title=lv_label_create(_dialog);lv_obj_align(title,LV_ALIGN_TOP_LEFT,15,8);
@@ -222,13 +270,43 @@ index 0000000..d6138e2
 +        lv_obj_add_event_cb(_password,focus,LV_EVENT_FOCUSED,keyboard);
 +        if(_username)lv_obj_add_event_cb(_username,focus,LV_EVENT_FOCUSED,keyboard);
 +        lv_keyboard_set_textarea(keyboard,_username?_username:_password);
++        if(ax900_has_saved(&_selected)) {
++            auto *saved=lv_button_create(_dialog);lv_obj_set_size(saved,180,48);lv_obj_align(saved,LV_ALIGN_TOP_LEFT,15,220);
++            label=lv_label_create(saved);lv_label_set_text(label,"Use saved login");lv_obj_center(label);
++            lv_obj_add_event_cb(saved,[](lv_event_t *e){auto *self=static_cast<Ax900Window *>(lv_event_get_user_data(e));
++                if(ax900_connect_saved(&self->_selected)==ESP_OK)self->closeDialog();
++                else lv_label_set_text(self->_dialogStatus,"Disconnect first, or enter a new password.");
++            },LV_EVENT_CLICKED,this);
++            lv_group_add_obj(_dialogGroup,saved);
++        }
++        if(_username)lv_group_add_obj(_dialogGroup,_username);
++        if(_selected.secured)lv_group_add_obj(_dialogGroup,_password);
++        if(_unverified)lv_group_add_obj(_dialogGroup,_unverified);
++        lv_group_add_obj(_dialogGroup,connect);lv_group_add_obj(_dialogGroup,cancel);
++        auto advance=[](lv_event_t *e){
++            lv_group_focus_obj(static_cast<lv_obj_t *>(lv_event_get_user_data(e)));
++            if(auto *input=lv_indev_active())lv_indev_wait_release(input);
++        };
++        if(_username)lv_obj_add_event_cb(_username,advance,LV_EVENT_READY,_password);
++        lv_obj_add_event_cb(_password,advance,LV_EVENT_READY,connect);
++        for(unsigned i=0;i<lv_group_get_obj_count(_dialogGroup);i++)lv_obj_add_event_cb(lv_group_get_obj_by_index(_dialogGroup,i),[](lv_event_t *e){
++            if(lv_event_get_key(e)==LV_KEY_ESC)static_cast<Ax900Window *>(lv_event_get_user_data(e))->closeDialog();
++        },LV_EVENT_KEY,this);
++        lv_group_focus_obj(_username?_username:_selected.secured?_password:connect);
 +    }
 +    uint32_t _time=0,_generation=UINT32_MAX;size_t _count=SIZE_MAX;
 +    void refresh() {
 +        if(!_snapshot)return;
 +        _time=GetHAL()->millis();ax900_get_status(_snapshot.get());
 +        auto &s=*_snapshot;
++        openRequested=false;
++        if(testRequested && !_dialog){showTest(true);testRequested=false;}
++        _testView->update(s);
++        if(runRequested && !_dialog){_testView->run();runRequested=false;}
 +        _status->setText(s.status);
++        lv_label_set_text_fmt(_memory,"Keyboard: %s   |   %s (%u)",tab5_keyboard_connected()?"ready":"not attached",
++            s.profile_error?"Save failed":s.credentials_saved?"Wi-Fi saved":"Saved networks",s.saved_networks);
++        if(s.saved_networks)lv_obj_remove_state(_forget,LV_STATE_DISABLED);else lv_obj_add_state(_forget,LV_STATE_DISABLED);
 +        _scanLabel->setText((s.associated || s.connecting)?"Disconnect":"Scan again");
 +        if(s.ready && !s.scanning)lv_obj_remove_state(_scan->get(),LV_STATE_DISABLED);
 +        else lv_obj_add_state(_scan->get(),LV_STATE_DISABLED);
@@ -247,6 +325,7 @@ index 0000000..d6138e2
 +            auto &ap=s.aps[i];unsigned ch=ap.frequency>5000?(ap.frequency-5000)/5:(ap.frequency-2407)/5;
 +            auto *row=lv_obj_create(_list->get());lv_obj_set_size(row,LV_PCT(100),58);
 +            lv_obj_remove_flag(row,LV_OBJ_FLAG_SCROLLABLE);
++            lv_group_add_obj(_group,row);
 +            lv_obj_add_flag(row,LV_OBJ_FLAG_CLICKABLE);lv_obj_set_user_data(row,reinterpret_cast<void *>(i+1));
 +            lv_obj_add_event_cb(row,[](lv_event_t *e){
 +                auto *self=static_cast<Ax900Window *>(lv_event_get_user_data(e));
@@ -290,15 +369,175 @@ index 0000000..d6138e2
 +    else _button->addFlag(LV_OBJ_FLAG_CLICKABLE);
 +}
 +#endif
+diff --git a/app/apps/app_launcher/view/ax900_test_view.h b/app/apps/app_launcher/view/ax900_test_view.h
+new file mode 100644
+--- /dev/null
++++ b/app/apps/app_launcher/view/ax900_test_view.h
+@@ -0,0 +1,20 @@
++// SPDX-License-Identifier: MIT
++#pragma once
++#ifdef ESP_PLATFORM
++#include <lvgl.h>
++#include <ax900.h>
++#include <ax900_probe.h>
++
++class Ax900TestView {
++public:
++    explicit Ax900TestView(lv_obj_t *parent);
++    ~Ax900TestView();
++    void show(bool visible);
++    void update(const ax900_status_t &link);
++    void run();
++    lv_obj_t *runButton() const {return _button;}
++private:
++    lv_obj_t *_root,*_ssid,*_band,*_steps[4],*_stepDots[4],*_traffic;
++    lv_obj_t *_addresses[4],*_button,*_buttonLabel,*_headline,*_summary,*_progress,*_samples[AX900_PROBE_COUNT];
++};
++#endif
+diff --git a/app/apps/app_launcher/view/ax900_test_view.cpp b/app/apps/app_launcher/view/ax900_test_view.cpp
+new file mode 100644
+--- /dev/null
++++ b/app/apps/app_launcher/view/ax900_test_view.cpp
+@@ -0,0 +1,130 @@
++// SPDX-License-Identifier: MIT
++#ifdef ESP_PLATFORM
++#include "ax900_test_view.h"
++#include <esp_netif.h>
++#include <cstdio>
++
++namespace {
++constexpr uint32_t ink=0xEEF5F6, muted=0x8FA7B4, green=0x69D9AE, amber=0xF4C577;
++lv_obj_t *box(lv_obj_t *parent,int x,int y,int w,int h,uint32_t color) {
++    auto *o=lv_obj_create(parent);lv_obj_set_pos(o,x,y);lv_obj_set_size(o,w,h);
++    lv_obj_set_style_bg_color(o,lv_color_hex(color),0);lv_obj_set_style_border_width(o,0,0);
++    lv_obj_set_style_radius(o,18,0);lv_obj_set_style_pad_all(o,0,0);
++    lv_obj_remove_flag(o,LV_OBJ_FLAG_SCROLLABLE);return o;
++}
++lv_obj_t *label(lv_obj_t *parent,const char *text,int x,int y,const lv_font_t *font,uint32_t color) {
++    auto *o=lv_label_create(parent);lv_label_set_text(o,text);lv_obj_set_pos(o,x,y);
++    lv_obj_set_style_text_font(o,font,0);lv_obj_set_style_text_color(o,lv_color_hex(color),0);return o;
++}
++}
++
++Ax900TestView::Ax900TestView(lv_obj_t *parent) {
++    _root=box(parent,24,140,1072,460,0x18242B);
++    auto *connection=box(_root,0,0,350,460,0x101E27);
++    label(connection,"CONNECTION",22,22,&lv_font_montserrat_14,muted);
++    _ssid=label(connection,"No network",22,55,&lv_font_montserrat_28,ink);
++    lv_obj_set_width(_ssid,306);lv_label_set_long_mode(_ssid,LV_LABEL_LONG_DOT);
++    _band=label(connection,"Select a network to connect",22,94,&lv_font_montserrat_16,muted);
++    constexpr const char *stages[]={"USB adapter","Wireless association","Authentication","DHCP address"};
++    for(unsigned i=0;i<4;i++) {
++        _stepDots[i]=box(connection,24,149+i*51,12,12,0x344A58);
++        lv_obj_set_style_radius(_stepDots[i],6,0);
++        label(connection,stages[i],50,144+i*51,&lv_font_montserrat_16,ink);
++        _steps[i]=label(connection,"WAIT",257,146+i*51,&lv_font_montserrat_14,muted);
++    }
++    auto *traffic=box(connection,18,363,314,78,0x1C303C);
++    label(traffic,"PACKETS SINCE BOOT",14,12,&lv_font_montserrat_14,muted);
++    _traffic=label(traffic,"TX 0     RX 0",14,37,&lv_font_montserrat_18,ink);
++
++    auto *addresses=box(_root,366,0,706,184,0x101E27);
++    constexpr const char *names[]={"IP ADDRESS","GATEWAY","SUBNET MASK","DNS SERVER"};
++    for(unsigned i=0;i<4;i++) {
++        int x=22+(i%2)*346,y=20+(i/2)*82;
++        label(addresses,names[i],x,y,&lv_font_montserrat_14,muted);
++        _addresses[i]=label(addresses,"--",x,y+25,&lv_font_montserrat_24,ink);
++    }
++    auto *ping=box(_root,366,200,706,260,0x101E27);
++    label(ping,"GATEWAY TEST",22,20,&lv_font_montserrat_14,muted);
++    _headline=label(ping,"Ready when connected",22,50,&lv_font_montserrat_24,ink);
++    _summary=label(ping,"5 requests  /  latency and packet loss",22,88,&lv_font_montserrat_16,muted);
++    _button=lv_button_create(ping);lv_obj_set_pos(_button,518,18);lv_obj_set_size(_button,166,54);
++    lv_obj_set_style_bg_color(_button,lv_color_hex(0x69D9AE),0);lv_obj_set_style_radius(_button,14,0);
++    _buttonLabel=label(_button,"Run test",0,0,&lv_font_montserrat_18,0x102821);lv_obj_center(_buttonLabel);
++    lv_obj_add_event_cb(_button,[](lv_event_t *e){
++        ax900_probe_start();
++    },LV_EVENT_CLICKED,nullptr);
++    for(unsigned i=0;i<AX900_PROBE_COUNT;i++) {
++        auto *cell=box(ping,22+i*136,128,118,52,0x203340);
++        _samples[i]=label(cell,"--",0,0,&lv_font_montserrat_18,muted);lv_obj_center(_samples[i]);
++    }
++    _progress=lv_bar_create(ping);lv_obj_set_pos(_progress,22,194);lv_obj_set_size(_progress,662,5);
++    lv_bar_set_range(_progress,0,AX900_PROBE_COUNT);
++    lv_obj_set_style_bg_color(_progress,lv_color_hex(0x243B49),LV_PART_MAIN);
++    lv_obj_set_style_bg_color(_progress,lv_color_hex(green),LV_PART_INDICATOR);
++    label(ping,"Local gateway only. Internet access is not tested.",22,219,&lv_font_montserrat_14,muted);
++}
++Ax900TestView::~Ax900TestView(){lv_obj_delete(_root);}
++void Ax900TestView::show(bool visible){
++    if(visible)lv_obj_remove_flag(_root,LV_OBJ_FLAG_HIDDEN);else lv_obj_add_flag(_root,LV_OBJ_FLAG_HIDDEN);
++}
++void Ax900TestView::run(){
++    if(!lv_obj_has_state(_button,LV_STATE_DISABLED))lv_obj_send_event(_button,LV_EVENT_CLICKED,nullptr);
++}
++void Ax900TestView::update(const ax900_status_t &s) {
++    bool active=s.connecting || s.associated;
++    lv_label_set_text(_ssid,active && s.connected_ssid[0]?s.connected_ssid:"No network");
++    if(active && s.connected_frequency) {
++        unsigned channel=s.connected_frequency>5000?(s.connected_frequency-5000)/5:(s.connected_frequency-2407)/5;
++        lv_label_set_text_fmt(_band,"%s   /   CH %u   /   %u MHz",s.connected_frequency>5000?"5 GHz":"2.4 GHz",channel,s.connected_frequency);
++    } else lv_label_set_text(_band,"Select a network to connect");
++    bool complete[]={s.ready,s.associated,s.authenticated,s.has_ip};
++    for(unsigned i=0;i<4;i++) {
++        bool busy=!complete[i] && (i==0?s.present:active && complete[i-1]);
++        uint32_t color=complete[i]?green:busy?amber:muted;
++        lv_label_set_text(_steps[i],complete[i]?"PASS":busy?"WAIT":"--");
++        lv_obj_set_style_text_color(_steps[i],lv_color_hex(color),0);
++        lv_obj_set_style_bg_color(_stepDots[i],lv_color_hex(complete[i]?green:busy?amber:0x344A58),0);
++    }
++    lv_label_set_text_fmt(_traffic,"TX %lu     RX %lu",(unsigned long)s.tx_packets,(unsigned long)s.rx_packets);
++    esp_netif_t *netif=esp_netif_get_handle_from_ifkey("AX900");
++    esp_netif_ip_info_t info={};esp_netif_dns_info_t dns={};
++    bool has_ip=s.has_ip && netif && esp_netif_get_ip_info(netif,&info)==ESP_OK;
++    if(has_ip) {
++        lv_label_set_text_fmt(_addresses[0],IPSTR,IP2STR(&info.ip));
++        lv_label_set_text_fmt(_addresses[1],IPSTR,IP2STR(&info.gw));
++        lv_label_set_text_fmt(_addresses[2],IPSTR,IP2STR(&info.netmask));
++        if(esp_netif_get_dns_info(netif,ESP_NETIF_DNS_MAIN,&dns)==ESP_OK && dns.ip.type==ESP_IPADDR_TYPE_V4 && dns.ip.u_addr.ip4.addr)
++            lv_label_set_text_fmt(_addresses[3],IPSTR,IP2STR(&dns.ip.u_addr.ip4));
++        else lv_label_set_text(_addresses[3],"Not provided");
++    } else for(auto *field:_addresses)lv_label_set_text(field,"--");
++
++    ax900_probe_result_t p;ax900_probe_get_result(&p);
++    bool running=p.state==AX900_PROBE_RUNNING,stale=p.state==AX900_PROBE_STALE;
++    if(has_ip && !running)lv_obj_remove_state(_button,LV_STATE_DISABLED);
++    else lv_obj_add_state(_button,LV_STATE_DISABLED);
++    lv_label_set_text(_buttonLabel,running?"Testing...":"Run test");
++    bool measured=p.state!=AX900_PROBE_IDLE && !stale && !p.error;
++    uint32_t color=p.state==AX900_PROBE_PASSED?green:p.state==AX900_PROBE_PARTIAL?amber:ink;
++    if(!has_ip)lv_label_set_text(_headline,"Connect to Wi-Fi first");
++    else if(stale)lv_label_set_text(_headline,"Connection changed");
++    else if(running)lv_label_set_text_fmt(_headline,"Testing %lu / %u",(unsigned long)p.sent,AX900_PROBE_COUNT);
++    else if(p.error)lv_label_set_text(_headline,"Could not start test");
++    else if(p.received)lv_label_set_text_fmt(_headline,"%lu ms  average",(unsigned long)p.average_ms);
++    else lv_label_set_text(_headline,p.state==AX900_PROBE_FAILED?"No gateway reply":"Ready to test");
++    lv_obj_set_style_text_color(_headline,lv_color_hex(color),0);
++    if(has_ip && measured && p.sent)
++        lv_label_set_text_fmt(_summary,"%lu / %lu replies   |   %lu%% loss   |   min %lu / max %lu ms",
++            (unsigned long)p.received,(unsigned long)p.sent,(unsigned long)((p.sent-p.received)*100/p.sent),(unsigned long)p.min_ms,(unsigned long)p.max_ms);
++    else if(stale)lv_label_set_text(_summary,"Run a new test for the current connection.");
++    else if(p.error && has_ip)lv_label_set_text(_summary,esp_err_to_name(p.error));
++    else lv_label_set_text(_summary,"5 requests  /  latency and packet loss");
++    lv_bar_set_value(_progress,measured && has_ip?p.sent:0,LV_ANIM_OFF);
++    for(unsigned i=0;i<AX900_PROBE_COUNT;i++) {
++        int32_t rtt=measured && has_ip?p.rtt_ms[i]:-1;
++        if(rtt>=0)lv_label_set_text_fmt(_samples[i],"%ld ms",(long)rtt);
++        else lv_label_set_text(_samples[i],rtt==-2?"Timeout":"--");
++        lv_obj_set_style_text_color(_samples[i],lv_color_hex(rtt>=0?green:rtt==-2?amber:muted),0);
++        lv_obj_center(_samples[i]);
++    }
++}
++#endif
 diff --git a/platforms/tab5/main/ax900_console.cpp b/platforms/tab5/main/ax900_console.cpp
 new file mode 100644
-index 0000000..4ad1eea
 --- /dev/null
 +++ b/platforms/tab5/main/ax900_console.cpp
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,91 @@
 +// SPDX-License-Identifier: MIT
 +// Local USB diagnostic commands for repeatable hardware and display verification.
 +#include <ax900.h>
++#include <ax900_probe.h>
 +#include <hal/hal.h>
 +#include <lvgl.h>
 +#include <unistd.h>
@@ -306,37 +545,24 @@ index 0000000..4ad1eea
 +#include <cstring>
 +#include <memory>
 +#include <esp_netif.h>
-+#include <ping/ping_sock.h>
 +#include <freertos/FreeRTOS.h>
 +#include <freertos/task.h>
++#include <hal/components/tab5_keyboard.h>
 +extern void ax900_ui_request_open();
 +extern void ax900_ui_request_select(const char *ssid);
++extern bool ax900_ui_can_snapshot();
 +
-+static void probe_done(esp_ping_handle_t handle,void *arg) {
-+    uint32_t sent=0,received=0,elapsed=0;
-+    esp_ping_get_profile(handle,ESP_PING_PROF_REQUEST,&sent,sizeof(sent));
-+    esp_ping_get_profile(handle,ESP_PING_PROF_REPLY,&received,sizeof(received));
-+    esp_ping_get_profile(handle,ESP_PING_PROF_DURATION,&elapsed,sizeof(elapsed));
-+    printf("AX900_PING sent=%lu received=%lu duration_ms=%lu\n",static_cast<unsigned long>(sent),static_cast<unsigned long>(received),static_cast<unsigned long>(elapsed));
-+    esp_ping_delete_session(handle);
-+}
-+static void probe_gateway() {
-+    esp_netif_t *netif=esp_netif_get_handle_from_ifkey("AX900");
-+    esp_netif_ip_info_t ip={};
-+    if(!netif || esp_netif_get_ip_info(netif,&ip)!=ESP_OK || !ip.ip.addr || !ip.gw.addr){printf("AX900_PING no DHCP address\n");return;}
-+    esp_ping_config_t config=ESP_PING_DEFAULT_CONFIG();
-+    config.target_addr.type=IPADDR_TYPE_V4;config.target_addr.u_addr.ip4.addr=ip.gw.addr;
-+    config.count=3;config.interval_ms=500;config.timeout_ms=1500;config.interface=esp_netif_get_netif_impl_index(netif);
-+    esp_ping_callbacks_t callbacks={};callbacks.on_ping_end=probe_done;
-+    esp_ping_handle_t handle;
-+    esp_err_t e=esp_ping_new_session(&config,&callbacks,&handle);
-+    if(e==ESP_OK){e=esp_ping_start(handle);if(e!=ESP_OK)esp_ping_delete_session(handle);}
-+    printf("AX900_PING_START %d\n",e);
++extern void ax900_ui_request_test(bool run);
++static void probe_status() {
++    ax900_probe_result_t p;ax900_probe_get_result(&p);
++    printf("AX900_PROBE state=%u sent=%lu received=%lu avg_ms=%lu min_ms=%lu max_ms=%lu elapsed_ms=%lu error=%d\n",
++        p.state,(unsigned long)p.sent,(unsigned long)p.received,(unsigned long)p.average_ms,
++        (unsigned long)p.min_ms,(unsigned long)p.max_ms,(unsigned long)p.elapsed_ms,p.error);
 +}
 +
 +static void snapshot() {
 +    lv_draw_buf_t *buffer;
-+    {LvglLockGuard lock;buffer=lv_snapshot_take(lv_screen_active(),LV_COLOR_FORMAT_RGB565);}
++    {LvglLockGuard lock;if(!ax900_ui_can_snapshot()){printf("AXSNAP BLOCKED credential dialog\n");return;}buffer=lv_snapshot_take(lv_screen_active(),LV_COLOR_FORMAT_RGB565);}
 +    if(!buffer){printf("AXSNAP ERROR allocation\n");return;}
 +    const unsigned width=buffer->header.w,height=buffer->header.h;
 +    std::unique_ptr<char[]> line(new(std::nothrow) char[width*6+1]);
@@ -378,7 +604,11 @@ index 0000000..4ad1eea
 +                for(size_t j=0;j<s->ap_count;j++)if(!strcmp(s->aps[j].ssid,ssid) && s->aps[j].frequency>5000 && (!frequency || s->aps[j].frequency==frequency) && (!best || s->aps[j].rssi>best->rssi))best=&s->aps[j];
 +                printf("AX900_ASSOCIATE_TEST %d\n",best?ax900_test_association(best):ESP_ERR_NOT_FOUND);
 +            }
-+            else if(!strcmp(command,"ax900 probe"))probe_gateway();
++            else if(!strcmp(command,"ax900 probe"))printf("AX900_PROBE_START %d\n",ax900_probe_start());
++            else if(!strcmp(command,"ax900 test"))ax900_ui_request_test(false);
++            else if(!strcmp(command,"ax900 test-run"))ax900_ui_request_test(true);
++            else if(!strcmp(command,"ax900 test-status"))probe_status();
++            else if(!strcmp(command,"ax900 keyboard")){LvglLockGuard lock;printf("TAB5_KEYBOARD connected=%u\n",tab5_keyboard_connected());}
 +            else if(!strcmp(command,"ax900 disconnect"))printf("AX900_DISCONNECT %d\n",ax900_disconnect());
 +            else if(!strcmp(command,"ax900 snapshot"))snapshot();
 +            else if(!strcmp(command,"ax900 status")) {
@@ -390,15 +620,176 @@ index 0000000..4ad1eea
 +                    s->connecting,s->associated,s->authenticated,s->has_ip,s->ip,
 +                    static_cast<unsigned long>(s->tx_packets),static_cast<unsigned long>(s->rx_packets),
 +                    static_cast<unsigned long>(s->rx_dropped),s->disconnect_reason);
++                printf("AX900_SAVED count=%u current=%u error=%d\n",s->saved_networks,s->credentials_saved,s->profile_error);
 +            }
 +        } else if(used<sizeof(command)-1)command[used++]=input[i];
 +    }
 +}
+diff --git a/platforms/tab5/main/hal/components/tab5_keyboard.h b/platforms/tab5/main/hal/components/tab5_keyboard.h
+new file mode 100644
+--- /dev/null
++++ b/platforms/tab5/main/hal/components/tab5_keyboard.h
+@@ -0,0 +1,7 @@
++// SPDX-License-Identifier: MIT
++#pragma once
++#include <lvgl.h>
++// All calls run under the LVGL lock. Keystrokes are never logged.
++lv_indev_t *tab5_keyboard_init(lv_display_t *display);
++void tab5_keyboard_set_group(lv_group_t *group);
++bool tab5_keyboard_connected();
+diff --git a/platforms/tab5/main/hal/components/tab5_keyboard_map.h b/platforms/tab5/main/hal/components/tab5_keyboard_map.h
+new file mode 100644
+--- /dev/null
++++ b/platforms/tab5/main/hal/components/tab5_keyboard_map.h
+@@ -0,0 +1,57 @@
++// SPDX-FileCopyrightText: 2026 M5Stack Technology CO LTD
++// SPDX-License-Identifier: MIT
++// Matrix protocol and layout based on m5stack/M5Unit-KEYBOARD UnitTab5Keyboard.
++#pragma once
++#include <cstdint>
++#include <cstring>
++
++namespace tab5_keyboard {
++// LVGL keypad codes, kept independent of LVGL for host verification.
++enum : uint32_t { Up=17, Down=18, Right=19, Left=20, Escape=27, Delete=127, Backspace=8, Enter=10, Next=9, Prev=11 };
++class Decoder {
++public:
++    void reset(){std::memset(down,0,sizeof(down));active=-1;key=0;pressed=false;}
++    bool feed(uint8_t raw) {
++        if(raw==0xff)return false;
++        unsigned row=(raw>>4)&7,col=raw&15;
++        if(row>=5 || col>=14)return false;
++        unsigned i=row*14+col;bool press=raw&0x80;
++        if(down[i]==press)return false;
++        down[i]=press;
++        if(!press){if(active==(int)i){pressed=false;active=-1;return true;}return false;}
++        if(i==42 || i==43 || i==56 || i==57 || down[56] || down[57])return false;
++        uint32_t value=base[i];
++        if(down[42]) {
++            static constexpr uint32_t symrow[]={ '~','?','@','#','$','%','^','&','/','<','>','{','}','|' };
++            if(row==1)value=symrow[col];
++            if(i==39)value=':';
++            if(i==40)value='"';
++            if(i==54)value='=';
++            if(i==65)value=',';
++        }
++        if(down[43]) {
++            if(value>='a' && value<='z')value-=32;
++            else {
++                const char *normal="1234567890-=[]\\;\'`,./";
++                const char *shifted="!@#$%^&*()_+{}|:\"~<>?";
++                const char *p=value>=32 && value<127?std::strchr(normal,(int)value):nullptr;
++                if(p)value=shifted[p-normal];
++            }
++            if(value==Next)value=Prev;
++        }
++        if(!value)return false;
++        key=value;pressed=true;active=i;return true;
++    }
++    uint32_t key=0;
++    bool pressed=false;
++private:
++    bool down[70]={};int active=-1;
++    static constexpr uint32_t base[70]={
++        Escape,'1','2','3','4','5','6','7','8','9','0','-','+',Delete,
++        '`','!','@','#','$','%','^','&','*','(',')','[',']','\\',
++        Next,'q','w','e','r','t','y','u','i','o','p',';','\'',Backspace,
++        0,0,'a','s','d','f','g','h','j','k','l',Up,'_',Enter,
++        0,0,'z','x','c','v','b','n','m','.',Left,Down,Right,' '
++    };
++};
++}
+diff --git a/platforms/tab5/main/hal/components/tab5_keyboard.cpp b/platforms/tab5/main/hal/components/tab5_keyboard.cpp
+new file mode 100644
+--- /dev/null
++++ b/platforms/tab5/main/hal/components/tab5_keyboard.cpp
+@@ -0,0 +1,80 @@
++// SPDX-License-Identifier: MIT
++#include "tab5_keyboard.h"
++#include "tab5_keyboard_map.h"
++#include <bsp/m5stack_tab5.h>
++#include <esp_log.h>
++#include <esp_timer.h>
++
++namespace {
++i2c_master_dev_handle_t device=nullptr;
++i2c_master_bus_handle_t bus=nullptr;
++lv_indev_t *input=nullptr;
++bool connected=false;
++int64_t nextProbe=0;
++tab5_keyboard::Decoder decoder;
++uint32_t deliveredKey=0;
++bool deliveredPressed=false,pendingPress=false;
++bool read(uint8_t reg,uint8_t &value) {
++    return i2c_master_transmit_receive(device,&reg,1,&value,1,10)==ESP_OK;
++}
++bool write(uint8_t reg,uint8_t value) {
++    uint8_t bytes[]={reg,value};return i2c_master_transmit(device,bytes,2,10)==ESP_OK;
++}
++void lost() {
++    if(connected)ESP_LOGI("Tab5Keyboard","Disconnected");
++    connected=false;decoder.reset();pendingPress=false;nextProbe=esp_timer_get_time()+1000000;
++}
++void readKeys(lv_indev_t *,lv_indev_data_t *data) {
++    data->state=LV_INDEV_STATE_RELEASED;data->key=decoder.key;
++    if(!device)return;
++    if(pendingPress){pendingPress=false;deliveredKey=decoder.key;deliveredPressed=true;
++        data->key=deliveredKey;data->state=LV_INDEV_STATE_PRESSED;data->continue_reading=true;return;}
++    if(!connected) {
++        if(esp_timer_get_time()<nextProbe)return;
++        nextProbe=esp_timer_get_time()+1000000;
++        if(!bus || i2c_master_probe(bus,0x6d,10)!=ESP_OK)return;
++        uint8_t address=0,version=0;
++        if(!read(0xff,address) || address!=0x6d || !read(0xfe,version) || !write(0x10,0) || !write(0x00,0) || !write(0x02,0))return;
++        decoder.reset();connected=true;
++        ESP_LOGI("Tab5Keyboard","Connected: I2C 0x6D, firmware=%u",version);
++    }
++    // Bounded draining prevents an active keyboard from starving display refresh.
++    for(unsigned budget=0;budget<8;budget++) {
++        uint8_t raw=0xff;
++        if(!read(0x20,raw)){lost();break;}
++        if(raw==0xff)break;
++        if(decoder.feed(raw)) {
++            data->continue_reading=true;
++            // LVGL requires a release edge between different key-down events,
++            // including overlapping keys during fast typing.
++            if(decoder.pressed && deliveredPressed){pendingPress=true;deliveredPressed=false;
++                data->key=deliveredKey;data->state=LV_INDEV_STATE_RELEASED;return;}
++            break;
++        }
++    }
++    data->key=decoder.key;data->state=decoder.pressed?LV_INDEV_STATE_PRESSED:LV_INDEV_STATE_RELEASED;
++    deliveredKey=decoder.key;deliveredPressed=decoder.pressed;
++}
++}
++lv_indev_t *tab5_keyboard_init(lv_display_t *display) {
++    if(input)return input;
++    // P4's separate LP controller can use GPIO 0/1 while Port A keeps HP I2C1
++    // on GPIO 53/54 and the board's internal devices keep HP I2C0.
++    i2c_master_bus_config_t busConfig={};
++    busConfig.i2c_port=LP_I2C_NUM_0;busConfig.sda_io_num=GPIO_NUM_0;busConfig.scl_io_num=GPIO_NUM_1;
++    busConfig.lp_source_clk=LP_I2C_SCLK_DEFAULT;busConfig.flags.enable_internal_pullup=true;
++    esp_err_t error=i2c_new_master_bus(&busConfig,&bus);
++    if(error!=ESP_OK){ESP_LOGE("Tab5Keyboard","Bus init failed: %s",esp_err_to_name(error));return nullptr;}
++    i2c_device_config_t cfg={};cfg.dev_addr_length=I2C_ADDR_BIT_LEN_7;cfg.device_address=0x6d;cfg.scl_speed_hz=100000;
++    if(i2c_master_bus_add_device(bus,&cfg,&device)!=ESP_OK){i2c_del_master_bus(bus);bus=nullptr;return nullptr;}
++    input=lv_indev_create();lv_indev_set_type(input,LV_INDEV_TYPE_KEYPAD);
++    lv_indev_set_display(input,display);lv_indev_set_read_cb(input,readKeys);
++    lv_indev_set_long_press_time(input,400);
++    return input;
++}
++void tab5_keyboard_set_group(lv_group_t *group) {
++    decoder.reset();deliveredKey=0;deliveredPressed=false;pendingPress=false;
++    if(connected && !write(0x02,0))lost();
++    if(input){lv_indev_reset(input,nullptr);lv_indev_set_group(input,group);}
++}
++bool tab5_keyboard_connected(){return connected;}
 diff --git a/platforms/tab5/sdkconfig.defaults b/platforms/tab5/sdkconfig.defaults
 --- a/platforms/tab5/sdkconfig.defaults
 +++ b/platforms/tab5/sdkconfig.defaults
-@@ -42,3 +42,4 @@
+@@ -42,3 +42,5 @@
  CONFIG_LV_USE_FONT_COMPRESSED=y
  CONFIG_LV_USE_DEMO_BENCHMARK=y
  CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 +CONFIG_LV_USE_SNAPSHOT=y
++CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y

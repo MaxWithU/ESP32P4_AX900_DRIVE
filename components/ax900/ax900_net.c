@@ -17,6 +17,7 @@
 #include "crypto/sha1.h"
 #include "mbedtls/platform_util.h"
 #include <stdatomic.h>
+#include "ax900_profile.h"
 
 struct packet { uint32_t generation;size_t len;bool encrypted;uint8_t bytes[1518]; };
 static struct {
@@ -33,7 +34,7 @@ static struct {
     uint8_t keys[5];
     atomic_bool authenticated, has_ip;
     atomic_uint generation;
-    bool authorize, failed, recycled;
+    bool authorize, failed, recycled, save_attempted;
     uint16_t reason;
     int64_t deadline, dhcp_deadline;
 } net;
@@ -94,6 +95,7 @@ esp_err_t ax_net_init(ax900_device_t *d) {
 }
 static void drain(QueueHandle_t q) {struct packet *p;while(q && xQueueReceive(q,&p,0)==pdTRUE)free(p);}
 static void clear_link(void) {
+    net.save_attempted=false;
     net.authenticated=false;net.has_ip=false;net.dhcp_deadline=0;atomic_fetch_add(&net.generation,1);net.authorize=false;net.deadline=0;
     if(net.netif)esp_netif_action_disconnected(net.netif,NULL,0,NULL);
     if(net.sm){wpa_sm_deinit(net.sm);net.sm=NULL;}
@@ -357,7 +359,13 @@ void ax_net_poll(ax900_device_t *d) {
     if(net.authenticated && !net.has_ip && net.dhcp_deadline && esp_timer_get_time()>net.dhcp_deadline){
         net.dhcp_deadline=0;ax_status("Authenticated; DHCP has not supplied an address");
     }
+    if(net.authenticated && net.has_ip && net.credentials && !net.credentials->skip_save && !net.save_attempted) {
+        net.save_attempted=true;
+        esp_err_t e=ax_profile_save(net.credentials);ax_profile_status(e==ESP_OK,e);
+        ESP_LOGI("AX900","Wi-Fi profile save: %s",esp_err_to_name(e));
+    }
     for(unsigned budget=0;budget<8 && xQueueReceive(net.tx,&p,0)==pdTRUE;budget++) {
         if(net.authenticated && p->generation==atomic_load(&net.generation))(void)ax_data_tx(d,p->bytes,p->len);free(p);
     }
 }
+void ax_net_disable_save(void){net.save_attempted=true;}

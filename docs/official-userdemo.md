@@ -43,4 +43,14 @@ idf.py -C platforms/tab5 -p /dev/cu.usbmodem1101 flash
 
 官方 `sdkconfig` 已启用 `CONFIG_LV_USE_SNAPSHOT=y`，补丁将此设置也加入 `sdkconfig.defaults`，以支持 `ax900 snapshot`；保留官方非阻塞 USB Serial/JTAG VFS 行为。串口命令和主机截图解码脚本见根目录 README。
 
+切换至 **Connection test** 查看四个连接阶段、地址信息及数据收发计数。连接并取得 DHCP 地址后，点击 **Run test** 运行 5 次网关 Ping；测试过程会逐格更新延迟，结束后显示平均值和丢包率。未连接时按钮不可用，切换标签或关闭窗口不会访问已释放的界面对象。重新连接后需重新测试。
+
+串口 `ax900 test` 打开面板，`ax900 test-run` 通过同一个界面按钮触发测试，`ax900 test-status` 输出结果；底层 API 为 `ax900_probe_start()` / `ax900_probe_get_result()`，定义见 `ax900_probe.h`。
+
 补丁源代码遵循 [MIT 许可](../patches/LICENSE.MIT)，AX900 驱动组件遵循 Apache-2.0。
+
+实体键盘使用量产 Tab5Keyboard 的 I²C 0x6D 协议（SDA=0、SCL=1），使用 ESP32-P4 的独立 LP I²C 控制器，Port A 继续使用原引脚 53/54，支持热接入。未使用旧的 TCA8418 测试程序；没有按键日志。`Aa` 按住为大写/Shift，`Sym` 按住使用符号层；Tab / Aa+Tab 切换焦点，Enter 从用户名移至密码、从密码移至 Connect，再按 Enter 连接；Esc 关闭输入窗口。可用 Tab 选中 Run test 再按 Enter。窗口状态栏显示键盘连接情况。
+
+认证且 DHCP 成功后自动保存最多 4 个网络，窗口显示 Wi-Fi saved。重启扫描后自动尝试最近成功的网络，优先同名 5 GHz AP；失败一次后留给用户操作。已保存的网络提供 Use saved login，也可直接输入新密码。Forget saved 只删除 AX900 命名空间，当前连接继续可用且不会立即重新保存。没有账号/密码串口输入或导出命令；凭据窗口禁止截图。NVS 默认未加密，详见 README。
+
+Ping 使用 SDK 自带实现，在启用 CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM 的 Tab5 固件上将任务栈放入 PSRAM；删除使用对应的 vTaskDeleteWithCaps。其他未启用外部任务栈的平台仍使用 SDK 默认分配方式。

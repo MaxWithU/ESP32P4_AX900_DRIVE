@@ -11,6 +11,9 @@
 - 网卡未烧录有效 MAC 时，基于 ESP32-P4 硬件地址派生稳定的本地单播地址；不写入网卡 eFuse。连接前在选定信道定向探测目标 AP。
 - 最多缓存 64 个 BSSID，提供 SSID、频率、RSSI 和加密标志。
 - 官方 M5Tab5 UserDemo 接入补丁：5 GHz 优先列表、密码/企业账号输入、连接/断开和 USB 串口诊断。
+- Tab5Keyboard 实体键盘：I²C 0x6D、Aa / Sym、字母数字符号、退格、Tab 焦点切换、方向键和 Enter 操作。
+- 成功联网后记忆最多 4 个网络，启动自动重连；提供使用已存账号连接及清除记录按钮。
+- **Connection test** 面板：USB / 关联 / 认证 / DHCP 状态、IP / 网关 / 子网掩码 / DNS、收发计数及 5 次网关 Ping 的逐次延迟、平均延迟和丢包率。
 - 上游 Hostap WPA2/EAP 状态机、mbedTLS PEAP TLS 1.2 桥接、USB 数据队列及独立 AX900 `esp_netif`。
 - 在 5260 MHz（信道 52）完成 PEAP/MSCHAPv2 认证、单播/组播密钥安装及独立 AX900 接口 DHCP 获取；通过绑定该接口的 ICMP 请求收到网关回复。
 - 两次连续无账号关联测试通过，覆盖断开后接口重建和重新扫描。实机扫描曾缓存 64 个热点，其中 45 个为 5 GHz；数量随环境变化，64 为缓存上限。
@@ -82,7 +85,9 @@ ax900_peap_config_t config = {
 esp_err_t result = ax900_connect_peap(&ap, &config);
 ```
 
-字符串会复制到驱动 RAM，不写入 NVS 或日志，断开或失败时清除。CA 校验还要求设备有正确时间。
+字符串会复制到驱动 RAM；认证并获得 DHCP 地址后，在设备 `ax900_wifi` NVS 命名空间保存最多 4 个网络的账号、密码和证书策略。失败尝试不会覆盖已保存配置，诊断关联不保存；断开后清除 RAM 中的连接请求。启动扫描后优先重连最近成功的网络，同名网络优先选 5 GHz。手动断开后保持断开，自动连接失败不会循环重试。CA 校验还要求设备有正确时间。
+
+`ax900_connect_saved(&ap)` 使用已保存配置连接，`ax900_has_saved(&ap)` 只返回是否已保存，`ax900_forget_saved()` 清除 AX900 保存记录。没有导出密码的接口。官方 NVS 默认未启用 Flash/NVS 加密，因此记录是设备本地持久存储，并非加密保险库；日志、快照和 Git 均不记录凭据。
 若用户明确选择不校验服务器，省略 CA/域名并显式设置 `allow_unverified_server=true`；这种模式无法验证服务器身份，账号信息可能被冒充热点窃取。官方示例窗口提供有明确标记的“不校验证书”选项；使用 CA/域名的应用需通过 API 提供配置。
 
 当前限制：CCMP、TLS 1.2，不支持 WPA3、TKIP、强制 PMF、EAP-TLS、自动漫游/预认证或密码变更。扫描期间不能连接，连接期间须先断开才能扫描。
@@ -90,7 +95,7 @@ esp_err_t result = ax900_connect_peap(&ap, &config);
 
 `associated` 仅表示无线关联；`authenticated` 表示 WPA2 密钥安装/控制端口开放；只有 `has_ip` 才表示 AX900 获得 DHCP 地址。官方演示中另一个 Wi-Fi AP 的 `192.168.4.1` 不能作为 AX900 已联网的证据。
 `ax900 associate` 只测试无线关联，不发送用户名或密码，不开放数据端口，成功后 10 秒自动断开。
-`ax900 probe` 通过 AX900 接口向 DHCP 网关发送 3 次 ICMP 请求。
+`ax900 probe` 与界面 **Run test** 使用同一个异步测试模块，通过 AX900 接口向 DHCP 网关发送 5 次 ICMP 请求。测试期间禁止重复启动；断开或重连后旧结果标记为过期。网关 Ping 只验证局域网可达性。官方图形固件通过 `xTaskCreateWithCaps()` 将 Ping 任务栈放入 PSRAM，避免显示和 PEAP 占用内部 RAM 后创建任务失败；仍使用所选 ESP-IDF 自带 ICMP 实现。
 
 ## 官方界面与诊断
 
@@ -104,6 +109,10 @@ ax900 select <SSID>
 ax900 associate [frequency_MHz] <SSID>
 ax900 disconnect
 ax900 probe
+ax900 test
+ax900 test-run
+ax900 test-status
+ax900 keyboard
 ax900 snapshot
 ```
 
@@ -118,9 +127,38 @@ mkdir -p logs
   --seconds 48 --png logs/screen.png
 ```
 
-macOS 重开 CDC 串口可能使设备复位；脚本默认等待 16 秒以避开启动动画。日志和快照含附近网络信息，默认保存在 Git 忽略的 `logs/` 目录。
+macOS 重开 CDC 串口可能使设备复位；脚本默认等待 16 秒以避开启动动画。日志和快照含附近网络信息，默认保存在 Git 忽略的 `logs/` 目录。凭据输入窗口打开时拒绝截图；串口键盘诊断只返回是否连接，不输出按键内容。
 
 ## 主机测试
+
+本地记忆与键盘映射测试（键盘需先应用官方补丁）：
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+  -I tests/profile_host -I tests/probe_host -I components/ax900/include -I components/ax900 \
+  tests/profile_test.c components/ax900/ax900_profile.c -o /tmp/ax900-profile-test
+/tmp/ax900-profile-test
+c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
+  -I ../Tab5/M5Tab5-UserDemo/platforms/tab5/main/hal/components \
+  tests/keyboard_test.cpp -o /tmp/tab5-keyboard-test
+/tmp/tab5-keyboard-test
+c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
+  -I tests/keyboard_host -I tests/probe_host \
+  -I ../Tab5/M5Tab5-UserDemo/platforms/tab5/main/hal/components \
+  tests/keyboard_input_test.cpp \
+  ../Tab5/M5Tab5-UserDemo/platforms/tab5/main/hal/components/tab5_keyboard.cpp \
+  -o /tmp/tab5-keyboard-input-test
+/tmp/tab5-keyboard-input-test
+```
+
+测试模块回归测试覆盖接口绑定、重复请求、部分/全部丢包、零毫秒延迟、断线结果失效与失败清理：
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+  -I tests/probe_host -I components/ax900/include \
+  tests/probe_test.c components/ax900/ax900_probe.c -o /tmp/ax900-probe-test
+/tmp/ax900-probe-test
+```
 
 ```sh
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \

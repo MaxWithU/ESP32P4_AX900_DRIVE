@@ -41,12 +41,7 @@ esp_err_t ax_net_init(ax900_device_t *d);
 void ax_net_stop(ax900_device_t *d);
 void ax_net_poll(ax900_device_t *d);
 void ax_net_receive(void *arg, const uint8_t *record, size_t length);
-typedef struct {
-    ax900_ap_t ap;
-    bool enterprise, allow_unverified_server, association_test;
-    char password[129], username[129], server_name[254];
-    char ca_pem[8193];
-} ax_connect_request_t;
+#include "ax900_credentials.h"
 void ax_free_connect_request(ax_connect_request_t *request);
 // Takes ownership, including on error.
 esp_err_t ax_net_connect(ax900_device_t *d, ax_connect_request_t *request);
@@ -54,4 +49,6 @@ void ax_net_disconnect(ax900_device_t *d, uint16_t reason);
 void ax_link_state(bool connecting, bool associated, bool authenticated, const char *ssid, uint16_t reason);
 void ax_ip_state(const char *ip);
 void ax_packet_count(bool tx, bool dropped);
+void ax_profile_status(bool saved, esp_err_t error);
+void ax_net_disable_save(void);
 void ax_supplicant_poll(void);

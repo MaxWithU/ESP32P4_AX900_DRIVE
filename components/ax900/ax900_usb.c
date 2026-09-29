@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "mbedtls/platform_util.h"
+#include "ax900_profile.h"
 
 static usb_host_client_handle_t client;
 static ax900_device_t *active;
@@ -17,14 +18,28 @@ static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
 static ax900_status_t state;
 static bool scan_requested, connect_requested, disconnect_requested;
 static ax_connect_request_t *requested_connection;
+static bool forget_requested, auto_reconnect_pending=true;
+void ax_profile_status(bool saved,esp_err_t error) {
+    unsigned count=ax_profile_count();
+    taskENTER_CRITICAL(&lock);
+    state.saved_networks=count;state.credentials_saved=saved;state.profile_error=error;
+    taskEXIT_CRITICAL(&lock);
+}
 void ax_parse_security(ax900_ap_t *ap);
 void ax_link_state(bool connecting, bool associated, bool authenticated, const char *ssid, uint16_t reason) {
     taskENTER_CRITICAL(&lock);
+    if((state.connecting || state.associated) && !connecting && !associated)state.connection_id++;
     state.connecting=connecting;state.associated=associated;state.authenticated=authenticated;
     state.disconnect_reason=reason;
     if(ssid)snprintf(state.connected_ssid,sizeof(state.connected_ssid),"%s",ssid);
-    if(!authenticated){state.has_ip=false;state.ip[0]=0;}
+    if(!authenticated){state.has_ip=false;state.ip[0]=0;state.credentials_saved=false;}
     taskEXIT_CRITICAL(&lock);
+}
+bool ax900_connection_is_current(uint32_t connection_id) {
+    taskENTER_CRITICAL(&lock);
+    bool current=state.connection_id==connection_id && state.ready && state.associated && state.authenticated && state.has_ip;
+    taskEXIT_CRITICAL(&lock);
+    return current;
 }
 void ax_ip_state(const char *ip) {
     taskENTER_CRITICAL(&lock);
@@ -43,7 +58,7 @@ void ax_free_connect_request(ax_connect_request_t *request) {
 static esp_err_t queue_connect(ax_connect_request_t *request) {
     taskENTER_CRITICAL(&lock);
     bool ready=state.ready && !state.scanning && !scan_requested && !state.connecting && !state.associated && !connect_requested;
-    if(ready){requested_connection=request;connect_requested=true;state.connecting=true;}
+    if(ready){requested_connection=request;connect_requested=true;auto_reconnect_pending=false;state.connecting=true;state.connection_id++;state.connected_frequency=request->ap.frequency;}
     taskEXIT_CRITICAL(&lock);
     if(!ready)ax_free_connect_request(request);
     return ready?ESP_OK:ESP_ERR_INVALID_STATE;
@@ -86,8 +101,22 @@ esp_err_t ax900_test_association(const ax900_ap_t *ap) {
     return queue_connect(request);
 }
 esp_err_t ax900_disconnect(void) {
-    taskENTER_CRITICAL(&lock);bool ready=state.ready;if(ready)disconnect_requested=true;taskEXIT_CRITICAL(&lock);
+    taskENTER_CRITICAL(&lock);bool ready=state.ready;if(ready){disconnect_requested=true;auto_reconnect_pending=false;}taskEXIT_CRITICAL(&lock);
     return ready?ESP_OK:ESP_ERR_INVALID_STATE;
+}
+esp_err_t ax900_connect_saved(const ax900_ap_t *ap) {
+    if(!valid_ap(ap))return ESP_ERR_INVALID_ARG;
+    ax_connect_request_t *r=ax_profile_find(ap,1);
+    return r?queue_connect(r):ESP_ERR_NOT_FOUND;
+}
+bool ax900_has_saved(const ax900_ap_t *ap) {
+    if(!valid_ap(ap))return false;
+    ax_connect_request_t *r=ax_profile_find(ap,1);bool found=r!=NULL;ax_free_connect_request(r);return found;
+}
+esp_err_t ax900_forget_saved(void) {
+    if(!client)return ESP_ERR_INVALID_STATE;
+    taskENTER_CRITICAL(&lock);forget_requested=true;auto_reconnect_pending=false;taskEXIT_CRITICAL(&lock);
+    return ESP_OK;
 }
 static const char *TAG="AX900";
 
@@ -323,6 +352,10 @@ static esp_err_t attach_device(uint8_t address) {
 static void client_task(void *arg) {
     for(;;) {
         ax_pump(20);
+        taskENTER_CRITICAL(&lock);bool forget=forget_requested;forget_requested=false;
+        if(forget && requested_connection)requested_connection->skip_save=true;
+        taskEXIT_CRITICAL(&lock);
+        if(forget){ax_net_disable_save();esp_err_t e=ax_profile_forget();ax_profile_status(false,e);}
         for(int i=1;i<128;i++) {
             if(removed[i]) {
                 removed[i]=false;
@@ -363,11 +396,18 @@ static void client_task(void *arg) {
             esp_err_t e=ax_scan(active);
             taskENTER_CRITICAL(&lock);state.scanning=false;state.scan_generation++;size_t count=state.ap_count;taskEXIT_CRITICAL(&lock);
             char msg[96];snprintf(msg,sizeof(msg),"%s: %u networks",e==ESP_OK?"Scan complete":"Scan failed",(unsigned)count);ax_status(msg);
+            taskENTER_CRITICAL(&lock);bool reconnect=auto_reconnect_pending && !connect_requested && !disconnect_requested;taskEXIT_CRITICAL(&lock);
+            if(e==ESP_OK && reconnect) {
+                ax900_status_t *snapshot=malloc(sizeof(*snapshot));
+                if(snapshot){ax900_get_status(snapshot);ax_connect_request_t *r=ax_profile_find(snapshot->aps,snapshot->ap_count);free(snapshot);
+                    if(r){ESP_LOGI(TAG,"Reconnecting using saved Wi-Fi profile");(void)queue_connect(r);}}
+            }
         }
     }
 }
 esp_err_t ax900_start(void) {
     if(client)return ESP_ERR_INVALID_STATE;
+    esp_err_t profile_error=ax_profile_init();ax_profile_status(false,profile_error);
     usb_host_client_config_t cfg={.is_synchronous=false,.max_num_event_msg=10,.async={.client_event_callback=event_cb}};
     TRY(usb_host_client_register(&cfg,&client));
     ax_status("Waiting for AX900");

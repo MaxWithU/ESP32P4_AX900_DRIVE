@@ -27,3 +27,10 @@ The PEAP TLS bridge is adapted from ESP-IDF v5.5.2:
   https://github.com/espressif/esp-idf/tree/v5.5.2
   Copyright (c) 2020-2025 Espressif Systems (Shanghai) CO LTD
   Apache-2.0. The bridge supports PEAP over TLS 1.2 using public mbedTLS APIs.
+
+The Tab5Keyboard protocol and matrix layout in the official integration patch
+are based on m5stack/M5Unit-KEYBOARD, src/unit/unit_Tab5Keyboard.cpp/.hpp,
+Copyright (c) 2026 M5Stack Technology CO LTD, MIT.
+The private ping adapter compiles the selected ESP-IDF's apps/ping/ping_sock.c
+with renamed entry points and capability-aware task allocation. That SDK source
+remains Apache-2.0, Copyright (c) 2019-2021 Espressif Systems (Shanghai) CO LTD.
