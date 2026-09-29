@@ -1,8 +1,8 @@
 # ESP32P4 AX900 Driver
 
-面向 ESP-IDF 的 AX900 USB Wi-Fi 驱动移植，已在 **M5Stack Tab5 / ESP32-P4** 上验证 2.4 GHz 和 5 GHz 热点扫描。
+面向 ESP-IDF 的 AX900 USB Wi-Fi 驱动移植，已在 **M5Stack Tab5 / ESP32-P4** 上验证双频扫描和 5 GHz 企业网络连接。
 
-**当前版本正在验证联网功能。已接入 STA 关联、WPA2-PSK、PEAP/MSCHAPv2、以太网收发及 DHCP；编译和 TLS 主机测试通过，但企业网络实机连接尚未验证成功，暂不能作为已完成的联网驱动使用。**
+**实机已通过 5 GHz PEAP/MSCHAPv2 认证、WPA2 密钥协商、AX900 DHCP 获取及网关 ICMP 通信验证。驱动仍处于实验阶段，互联网访问、长期稳定性和吞吐尚未验证。**
 
 ## 已实现与验证
 
@@ -12,8 +12,8 @@
 - 最多缓存 64 个 BSSID，提供 SSID、频率、RSSI 和加密标志。
 - 官方 M5Tab5 UserDemo 接入补丁：5 GHz 优先列表、密码/企业账号输入、连接/断开和 USB 串口诊断。
 - 上游 Hostap WPA2/EAP 状态机、mbedTLS PEAP TLS 1.2 桥接、USB 数据队列及独立 AX900 `esp_netif`。
-- 已实机验证 5 GHz STA 关联成功及初始 EAPOL 接收；这不等于企业账号认证或 DHCP 成功。
-- 实机最近一次验证缓存 64 个热点，其中 45 个为 5 GHz；数量随环境变化，64 为缓存上限。
+- 在 5260 MHz（信道 52）完成 PEAP/MSCHAPv2 认证、单播/组播密钥安装及独立 AX900 接口 DHCP 获取；通过绑定该接口的 ICMP 请求收到网关回复。
+- 两次连续无账号关联测试通过，覆盖断开后接口重建和重新扫描。实机扫描曾缓存 64 个热点，其中 45 个为 5 GHz；数量随环境变化，64 为缓存上限。
 - USB 报文解析通过 ASan / UBSan 检查，包括实机报文、截断、聚合及 100,000 组异常输入。
 
 环境：ESP-IDF **5.5.2**、ESP32-P4 rev v1.3、16 MB Flash、Tab5 V3。AX900 芯片寄存器为 `0xe1078820`，运行固件为 `0x06090100`。其他同名 AX900 产品、USB ID 和芯片版本尚未验证；产品名称或 USB ID 不能单独确定芯片子型号。详见 [验证记录](VALIDATION.json)。
@@ -128,7 +128,7 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
 /tmp/ax900-frame-test
 ```
 
-长期热插拔稳定性、真实认证、DHCP 与吞吐仍待验证。协议及固件兼容性说明见 [固件说明](components/ax900/firmware/README.md)。
+企业网络实测使用用户显式选择的不校验证书模式；CA/域名校验通过 TLS 主机测试，尚未在真实企业网络验证。WPA2-Personal/开放网络实机连接、互联网 DNS/HTTP、重新认证、长期热插拔稳定性与吞吐仍待验证。协议及固件兼容性说明见 [固件说明](components/ax900/firmware/README.md)。
 
 官方动画库修复的回归测试（先按接入说明应用依赖补丁）：
 

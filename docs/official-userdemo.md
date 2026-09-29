@@ -39,7 +39,7 @@ idf.py -C platforms/tab5 -p /dev/cu.usbmodem1101 flash
 
 已经安装相同官方分区布局时，可仅更新 `0x10000` 处的应用镜像 `platforms/tab5/build/m5stack_tab5.bin`。
 
-启动后点击右上角 **AX900 Wi-Fi**。列表显示 SSID、频段、信道和 RSSI；**Scan again** 重新扫描。点击网络可输入个人密码，或 PEAP/MSCHAPv2 的企业用户名和密码；连接后使用 **Disconnect** 断开。企业窗口按用户选择提供明确标记的“不校验证书”模式，API 也支持 PEM CA 与服务器域名。联网功能仍处于实机验证阶段，状态边界见根目录 README。
+启动后点击右上角 **AX900 Wi-Fi**。列表显示 SSID、频段、信道和 RSSI；**Scan again** 重新扫描。点击网络可输入个人密码，或 PEAP/MSCHAPv2 的企业用户名和密码；连接后使用 **Disconnect** 断开。企业窗口按用户选择提供明确标记的“不校验证书”模式，API 也支持 PEM CA 与服务器域名。已实机验证 5 GHz PEAP/MSCHAPv2、DHCP 和网关通信，验证范围见根目录 README 与 VALIDATION.json。
 
 官方 `sdkconfig` 已启用 `CONFIG_LV_USE_SNAPSHOT=y`，补丁将此设置也加入 `sdkconfig.defaults`，以支持 `ax900 snapshot`；保留官方非阻塞 USB Serial/JTAG VFS 行为。串口命令和主机截图解码脚本见根目录 README。
 

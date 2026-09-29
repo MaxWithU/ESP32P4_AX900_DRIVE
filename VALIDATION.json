@@ -4,7 +4,7 @@
   "chip_register": "0xe1078820",
   "usb_runtime": "a69c:8d81",
   "firmware_version": "0x06090100",
-  "status": "Experimental connection support; real 5 GHz association and initial EAPOL reception confirmed; full authentication and DHCP pending",
+  "status": "5 GHz WPA2 Enterprise connection verified on hardware: PEAP/MSCHAPv2, pairwise/group keys, AX900 DHCP and gateway ICMP replies",
   "application": "M5Tab5-UserDemo/platforms/tab5/build/m5stack_tab5.bin",
   "application_bytes": 6386160,
   "application_sha256": "63cf64f63dc22010bd035a40144427e76db0d98d29a5bc6b54d1d15ca3d11335",
@@ -21,7 +21,7 @@
     "independent esp_netif and DHCP integration",
     "association-only diagnostic and interface-bound gateway ping"
   ],
-  "evidence_note": "Hardware run completed on 2026-09-29; raw serial logs, SSIDs, screenshots and full flash backups are retained locally.",
+  "evidence_note": "Real hardware run on 2026-09-29. Public record omits account, SSID, BSSID, device MAC and private IP addresses. Local ignored logs retain status evidence; credentials are not logged.",
   "repository_verification": {
     "date": "2026-09-29",
     "source": "Current repository working tree with vendored Hostap 2.11",
@@ -35,11 +35,10 @@
     "device_flash": "Official application partition updated and verified with esptool"
   },
   "not_yet_verified": [
-    "successful real PEAP/MSCHAPv2 exchange",
-    "real WPA2 four-way handshake and key installation",
-    "AX900 DHCP lease",
-    "gateway ping",
-    "long-term hotplug stability and throughput"
+    "WPA2-Personal and open-network hardware connection",
+    "CA-validated PEAP on real hardware (host TLS trust tests passed)",
+    "Internet DNS/HTTP connectivity",
+    "long-term hotplug stability, reauthentication and throughput"
   ],
   "host_tests": {
     "frame": "ASan/UBSan: captured frames, truncation, aggregation and 100000 malformed inputs passed",
@@ -61,5 +60,34 @@
     ],
     "recycled_vif_scan_confirmed": true
   },
-  "official_boot": "Startup animation resumes and main UI/console reachable after Spring velocity initialization"
+  "official_boot": "Startup animation resumes and main UI/console reachable after Spring velocity initialization",
+  "hardware_connection": {
+    "driver_commit": "29d812cd190bdc0f0f66a105141c5fa44f1eaa6a",
+    "frequency_mhz": 5260,
+    "channel": 52,
+    "security": "WPA2 Enterprise / CCMP",
+    "eap": "PEAP / MSCHAPv2",
+    "server_certificate_verification": "explicitly disabled by user on this test network",
+    "association": true,
+    "peap_success": true,
+    "pairwise_key_installed": true,
+    "group_key_installed": true,
+    "authenticated": true,
+    "dhcp_lease_on_ax900": true,
+    "gateway_ping": [
+      {
+        "sent": 3,
+        "received": 2,
+        "duration_ms": 1632
+      },
+      {
+        "sent": 3,
+        "received": 3,
+        "duration_ms": 43
+      }
+    ],
+    "interface": "AX900 esp_netif (explicitly bound ICMP probe)",
+    "association_to_dhcp_ms": 2358,
+    "credentials": "entered on Tab5; never logged, persisted or committed"
+  }
 }
