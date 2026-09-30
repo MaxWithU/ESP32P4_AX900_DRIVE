@@ -51,9 +51,9 @@ for mode in date no-date; do
     cmake --build "$build_dir" -j 8 > "$test_dir/build.log" 2>&1 || { tail -50 "$test_dir/build.log"; exit 1; }
     cc -g -Wall -Wextra -Wno-unused-parameter -fsanitize=address,undefined \
         -DCONFIG_NO_STDOUT_DEBUG -DCONFIG_NO_WPA_MSG -DMBEDTLS_USER_CONFIG_FILE=\"$config\" \
-        -I "$repo/tests/host" -I "$repo/components/ax900/supplicant/src" \
+        -I "$repo/tests/host" -I "$repo/tests/recovery_host" -I "$repo/tests/probe_host" -I "$repo/components/ax900/include" -I "$repo/components/ax900" -I "$repo/components/ax900/supplicant/src" \
         -I "$repo/components/ax900/supplicant/src/utils" -I "$MBEDTLS_SOURCE/include" \
-        "$repo/tests/tls_bridge_test.c" "$repo/components/ax900/ax900_tls.c" \
+        "$repo/tests/tls_bridge_test.c" "$repo/components/ax900/ax900_tls.c" "$repo/components/ax900/ax900_help.c" \
         "$repo/components/ax900/supplicant/src/utils/wpabuf.c" \
         "$build_dir/library/libmbedtls.a" "$build_dir/library/libmbedx509.a" \
         "$build_dir/library/libmbedcrypto.a" -o "$test_dir/test"

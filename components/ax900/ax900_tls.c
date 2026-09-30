@@ -11,6 +11,7 @@
 #include "mbedtls/platform_util.h"
 #include "mbedtls/platform_time.h"
 #include "esp_log.h"
+#include "ax900_issue.h"
 
 #define TLS_BUFFER_LIMIT 65536
 struct tls_connection {
@@ -29,9 +30,10 @@ static bool verification_time_ready(void)
 #if defined(MBEDTLS_HAVE_TIME) && defined(MBEDTLS_HAVE_TIME_DATE)
     // Detect an unset/reset clock. The application must set accurate UTC from a
     // trusted RTC or other trusted source before attempting verified PEAP.
-    return mbedtls_time(NULL) >= 1577836800; // 2020-01-01 UTC
+    if(mbedtls_time(NULL)<1577836800){ax_issue_set(AX900_ISSUE_CLOCK);return false;} // 2020-01-01 UTC
+    return true;
 #else
-    return false;
+    ax_issue_set(AX900_ISSUE_TLS_CONFIG);return false;
 #endif
 }
 
@@ -125,7 +127,7 @@ int tls_connection_set_params(void *ctx, struct tls_connection *c, const struct 
             return -1;
         }
         if (!p->domain_match || !p->domain_match[0] ||
-            mbedtls_x509_crt_parse(&c->ca, p->ca_cert_blob, p->ca_cert_blob_len) != 0) return -1;
+            mbedtls_x509_crt_parse(&c->ca, p->ca_cert_blob, p->ca_cert_blob_len) != 0) {ax_issue_set(AX900_ISSUE_CA);return -1;}
         mbedtls_ssl_conf_ca_chain(&c->conf, &c->ca, NULL);
         mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
         c->verified = true;
@@ -170,6 +172,11 @@ struct wpabuf *tls_connection_handshake(void *ctx, struct tls_connection *c,
     int ret = mbedtls_ssl_handshake(&c->ssl);
     if (ret && ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
         c->failed = true;
+        uint32_t flags=mbedtls_ssl_get_verify_result(&c->ssl);
+        if(c->verified && flags && flags!=UINT32_MAX){
+            ax_issue_set(flags & (MBEDTLS_X509_BADCERT_EXPIRED|MBEDTLS_X509_BADCERT_FUTURE)?AX900_ISSUE_CERT_DATE:
+                flags & MBEDTLS_X509_BADCERT_CN_MISMATCH?AX900_ISSUE_CERT_NAME:AX900_ISSUE_CERTIFICATE);
+        } else ax_issue_if_clear(AX900_ISSUE_TLS);
         ESP_LOGW("AX900", "PEAP TLS failed: -0x%04x", (unsigned)-ret);
     } else if (!ret && application && c->input) {
         *application = tls_connection_decrypt(ctx, c, NULL);

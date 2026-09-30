@@ -10,6 +10,7 @@
 #include "ax900_profile.h"
 #include "ax900_recovery.h"
 #include "ax900_diagnostics.h"
+#include "ax900_issue.h"
 #include "ax900_metrics.h"
 #include "ax900_events.h"
 #include "ax900_probe.h"
@@ -764,7 +765,7 @@ static bool client_step(void) {
         bool connect=connect_requested;connect_requested=false;
         ax_connect_request_t *request=requested_connection;requested_connection=NULL;
         taskEXIT_CRITICAL(&lock);
-        if(disconnect){ax_net_disconnect(active,3);connect=false;ax_free_connect_request(request);request=NULL;}
+        if(disconnect){ax_issue_set(AX900_ISSUE_NONE);ax_net_disconnect(active,3);connect=false;ax_free_connect_request(request);request=NULL;}
         if(connect){
             taskENTER_CRITICAL(&lock);operation_active=true;taskEXIT_CRITICAL(&lock);
             esp_err_t e=ax_net_connect(active,request);

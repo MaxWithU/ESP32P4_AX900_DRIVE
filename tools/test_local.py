@@ -35,8 +35,10 @@ with tempfile.TemporaryDirectory(prefix='ax900-regression-') as folder:
     for per_interface in [0,1]:
         host('net_test' if per_interface else 'net_test_global_dns', files=['tests/net_test_test.c'], includes=['tests/net_test_host', 'tests/recovery_host', 'tests/probe_host', 'components/ax900/include', 'components/ax900'], defines=['-Wno-sign-compare', f'-DCONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF={per_interface}'])
     includes = ['tests/recovery_host', 'tests/profile_host', 'tests/probe_host', 'components/ax900/include', 'components/ax900']
-    host('recovery', ['tests/recovery_test.c', 'components/ax900/ax900_metrics.c'], includes=includes)
+    host('help', ['tests/help_test.c', 'components/ax900/ax900_help.c'], includes=includes)
+    host('recovery', ['tests/recovery_test.c', 'components/ax900/ax900_metrics.c', 'components/ax900/ax900_help.c'], includes=includes)
     host('wifi_recovery', includes=includes)
+    run('release_tools', [['python3', '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'release_tools_test.py']])
     if a.official:
         keyboard = a.official.resolve() / 'platforms/tab5/main/hal/components'
         ui = a.official.resolve() / 'dependencies/smooth_ui_toolkit/src'

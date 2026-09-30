@@ -112,9 +112,10 @@ diff --git a/app/apps/app_launcher/view/panel_ax900.cpp b/app/apps/app_launcher/
 new file mode 100644
 --- /dev/null
 +++ b/app/apps/app_launcher/view/panel_ax900.cpp
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,354 @@
 +// SPDX-License-Identifier: MIT
 +#ifdef ESP_PLATFORM
++#include <ax900_help.h>
 +#include "view.h"
 +#include "ax900_test_view.h"
 +#include <ax900.h>
@@ -153,6 +154,8 @@ new file mode 100644
 +        lv_obj_set_width(_status->get(),640);lv_label_set_long_mode(_status->get(),LV_LABEL_LONG_DOT);
 +        _status->setTextFont(&lv_font_montserrat_18);
 +        _status->setTextColor(lv_color_hex(0xB5CFDD));
++        lv_obj_add_flag(_status->get(),LV_OBJ_FLAG_CLICKABLE);lv_group_add_obj(_group,_status->get());
++        _status->onClick().connect([this]{showHelp();});
 +        _scan=std::make_unique<Container>(_window->get());
 +        _scan->setSize(135,46);_scan->align(LV_ALIGN_TOP_RIGHT,-26,50);
 +        _scan->setBgColor(lv_color_hex(0x247F9C));_scan->setBorderWidth(0);
@@ -229,6 +232,20 @@ new file mode 100644
 +        credentialDialogOpen=false;
 +        _dialog=nullptr;_password=nullptr;_dialogStatus=nullptr;_username=nullptr;_unverified=nullptr;_server=nullptr;_caFile=nullptr;
 +    }
++    void showHelp() {
++        if(_dialog || !_snapshot || (_testView && _testView->settingsOpen()))return;
++        auto help=ax900_connection_help(_snapshot.get());if(!help.title[0])return;
++        _dialogGroup=lv_group_create();tab5_keyboard_set_group(_dialogGroup);
++        _dialog=lv_obj_create(lv_screen_active());lv_obj_set_size(_dialog,850,310);lv_obj_center(_dialog);
++        auto *title=lv_label_create(_dialog);lv_obj_set_pos(title,20,20);lv_obj_set_width(title,780);
++        lv_obj_set_style_text_font(title,&lv_font_montserrat_24,0);lv_label_set_text(title,help.title);
++        auto *advice=lv_label_create(_dialog);lv_obj_set_pos(advice,20,78);lv_obj_set_width(advice,780);
++        lv_obj_set_style_text_font(advice,&lv_font_montserrat_20,0);lv_label_set_long_mode(advice,LV_LABEL_LONG_WRAP);lv_label_set_text(advice,help.action);
++        auto *close=lv_button_create(_dialog);lv_obj_set_pos(close,620,215);lv_obj_set_size(close,165,50);
++        auto *text=lv_label_create(close);lv_label_set_text(text,"Close");lv_obj_center(text);
++        lv_obj_add_event_cb(close,[](lv_event_t *e){static_cast<Ax900Window *>(lv_event_get_user_data(e))->closeDialog();},LV_EVENT_CLICKED,this);
++        lv_group_add_obj(_dialogGroup,close);lv_group_focus_obj(close);
++    }
 +    void showSaved() {
 +        if(_dialog || (_testView && _testView->settingsOpen()))return;
 +        closeDialog();credentialDialogOpen=true;
@@ -277,7 +294,7 @@ new file mode 100644
 +        _dialogStatus=lv_label_create(_dialog);lv_obj_align(_dialogStatus,LV_ALIGN_TOP_LEFT,15,45);
 +        lv_label_set_text(_dialogStatus,_selected.secured?"WPA2 Personal - enter password":"Open network");
 +        bool supported=_selected.ssid_len && (!_selected.secured || ((_selected.wpa2_psk || _selected.enterprise) && !_selected.pmf_required));
-+        if(!supported)lv_label_set_text(_dialogStatus,_selected.enterprise?"This network requires enterprise authentication.":"This network's authentication is not supported yet.");
++
 +        if(_selected.enterprise) {
 +            lv_label_set_text(_dialogStatus,"WPA2 Enterprise - PEAP / MSCHAPv2");
 +            _username=lv_textarea_create(_dialog);lv_obj_set_size(_username,495,58);
@@ -291,6 +308,9 @@ new file mode 100644
 +            _caFile=lv_textarea_create(_dialog);lv_obj_set_size(_caFile,495,52);lv_obj_align(_caFile,LV_ALIGN_TOP_LEFT,535,198);
 +            lv_textarea_set_one_line(_caFile,true);lv_textarea_set_max_length(_caFile,127);lv_textarea_set_placeholder_text(_caFile,"CA file on SD: /sd/radius-ca.pem");
 +        }
++        if(!supported)lv_label_set_text(_dialogStatus,_selected.pmf_required?"PMF is required here. Choose a WPA2 network without required PMF.":"Network type is unsupported. Choose a visible WPA2/CCMP network.");
++        lv_obj_set_width(_dialogStatus,1015);lv_obj_set_style_text_font(_dialogStatus,&lv_font_montserrat_16,0);
++        lv_label_set_long_mode(_dialogStatus,LV_LABEL_LONG_WRAP);
 +        _password=lv_textarea_create(_dialog);lv_obj_set_size(_password,1015,58);lv_obj_align(_password,LV_ALIGN_TOP_LEFT,15,82);
 +        lv_textarea_set_one_line(_password,true);lv_textarea_set_password_mode(_password,true);lv_textarea_set_password_show_time(_password,0);
 +        if(_selected.enterprise){lv_obj_set_size(_password,495,58);lv_obj_align(_password,LV_ALIGN_TOP_LEFT,535,82);}
@@ -310,7 +330,7 @@ new file mode 100644
 +                    const char *path=lv_textarea_get_text(self->_caFile);
 +                    if(strncmp(path,"/sd/",4) || strstr(path,"..")){lv_label_set_text(self->_dialogStatus,"Choose a PEM CA file under /sd/ and its server DNS name.");return;}
 +                    bool mounted=false;FILE *file=fopen(path,"rb");
-+                    if(!file && bsp_sdcard_init("/sd",25)==ESP_OK){mounted=true;file=fopen(path,"rb");}
++                    if(!file && bsp_sdcard_init(const_cast<char *>("/sd"),25)==ESP_OK){mounted=true;file=fopen(path,"rb");}
 +                    long size=-1;if(file && !fseek(file,0,SEEK_END)){size=ftell(file);rewind(file);}
 +                    bool valid=false;
 +                    if(size>0 && size<=8192){ca.reset(new(std::nothrow) char[size+1]);if(ca && fread(ca.get(),1,size,file)==static_cast<size_t>(size)){ca[size]=0;valid=true;}}
@@ -322,7 +342,7 @@ new file mode 100644
 +                result=ax900_connect_peap(&self->_selected,&config);
 +            } else result=ax900_connect(&self->_selected,password);
 +            if(result==ESP_OK)self->closeDialog();
-+            else lv_label_set_text(self->_dialogStatus,result==ESP_ERR_INVALID_STATE?"Wait for scanning to finish, or disconnect first.":"Check account/password and certificate option.");
++            else {auto help=ax900_request_help(result);lv_label_set_text_fmt(self->_dialogStatus,"%s: %s",help.title,help.action);}
 +        },LV_EVENT_CLICKED,this);
 +        if(!supported)lv_obj_add_state(connect,LV_STATE_DISABLED);
 +        auto *cancel=lv_button_create(_dialog);lv_obj_set_size(cancel,140,48);lv_obj_align(cancel,LV_ALIGN_TOP_RIGHT,-195,270);
@@ -339,8 +359,9 @@ new file mode 100644
 +            auto *saved=lv_button_create(_dialog);lv_obj_set_size(saved,180,48);lv_obj_align(saved,LV_ALIGN_TOP_LEFT,15,270);
 +            label=lv_label_create(saved);lv_label_set_text(label,"Use saved login");lv_obj_center(label);
 +            lv_obj_add_event_cb(saved,[](lv_event_t *e){auto *self=static_cast<Ax900Window *>(lv_event_get_user_data(e));
-+                if(ax900_connect_saved(&self->_selected)==ESP_OK)self->closeDialog();
-+                else lv_label_set_text(self->_dialogStatus,"Disconnect first, or enter a new password.");
++                esp_err_t result=ax900_connect_saved(&self->_selected);
++                if(result==ESP_OK)self->closeDialog();
++                else {auto help=ax900_request_help(result);lv_label_set_text_fmt(self->_dialogStatus,"%s: %s",help.title,help.action);}
 +            },LV_EVENT_CLICKED,this);
 +            lv_group_add_obj(_dialogGroup,saved);
 +        }
@@ -370,7 +391,9 @@ new file mode 100644
 +        if(testRequested && !_dialog){showTest(true);testRequested=false;}
 +        _testView->update(s);
 +        if(runRequested && !_dialog){_testView->run();runRequested=false;}
-+        _status->setText(s.status);
++        auto help=ax900_connection_help(&s);
++        if(help.title[0])lv_label_set_text_fmt(_status->get(),"%s  -  tap for help",help.title);
++        else _status->setText(s.status);
 +        lv_label_set_text_fmt(_memory,"Keyboard: %s   |   %s (%u)",tab5_keyboard_connected()?"ready":"not attached",
 +            s.profile_error?"Save failed":s.credentials_saved?"Wi-Fi saved":"Saved networks",s.saved_networks);
 +        if(s.saved_networks)lv_obj_remove_state(_forget,LV_STATE_DISABLED);else lv_obj_add_state(_forget,LV_STATE_DISABLED);
@@ -448,7 +471,7 @@ diff --git a/app/apps/app_launcher/view/ax900_test_view.h b/app/apps/app_launche
 new file mode 100644
 --- /dev/null
 +++ b/app/apps/app_launcher/view/ax900_test_view.h
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,33 @@
 +// SPDX-License-Identifier: MIT
 +#pragma once
 +#ifdef ESP_PLATFORM
@@ -474,7 +497,9 @@ new file mode 100644
 +    ax900_test_config_t _config={};
 +    esp_err_t _startError=ESP_OK;
 +    bool _targetChanged=false;
++    unsigned _lastMode=0;
 +    lv_obj_t *_mode=nullptr,*_configure=nullptr,*_settings=nullptr,*_fields[4]={};
++    lv_obj_t *_settingsStatus=nullptr;
 +    lv_group_t *_settingsGroup=nullptr,*_previousGroup=nullptr;
 +    lv_obj_t *_root,*_ssid,*_band,*_steps[4],*_stepDots[4],*_traffic;
 +    lv_obj_t *_addresses[4],*_button,*_buttonLabel,*_headline,*_summary,*_progress,*_samples[AX900_PROBE_COUNT];
@@ -484,10 +509,11 @@ diff --git a/app/apps/app_launcher/view/ax900_test_view.cpp b/app/apps/app_launc
 new file mode 100644
 --- /dev/null
 +++ b/app/apps/app_launcher/view/ax900_test_view.cpp
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,234 @@
 +// SPDX-License-Identifier: MIT
 +#ifdef ESP_PLATFORM
 +#include "ax900_test_view.h"
++#include <ax900_help.h>
 +#include <esp_netif.h>
 +#include <cstdio>
 +#include <cstdlib>
@@ -574,6 +600,7 @@ new file mode 100644
 +    unsigned mode=lv_dropdown_get_selected(_mode);
 +    ax900_test_result_t result;ax900_test_get_result(&result);
 +    if(result.state==AX900_TEST_RUNNING){ax900_test_cancel();return;}
++    _lastMode=mode;
 +    _config.kind=static_cast<ax900_test_kind_t>(mode?mode-1:0);
 +    _startError=mode?ax900_test_start(&_config):ax900_probe_start();
 +    if(_startError==ESP_OK)_targetChanged=false;
@@ -602,11 +629,16 @@ new file mode 100644
 +        lv_obj_add_event_cb(_fields[i],[](lv_event_t *e){lv_keyboard_set_textarea(static_cast<lv_obj_t *>(lv_event_get_user_data(e)),static_cast<lv_obj_t *>(lv_event_get_target(e)));},LV_EVENT_FOCUSED,keyboard);
 +    }
 +    lv_keyboard_set_textarea(keyboard,_fields[0]);
++    _settingsStatus=label(_settings,"",20,260,&lv_font_montserrat_16,amber);
++    lv_obj_set_width(_settingsStatus,640);lv_label_set_long_mode(_settingsStatus,LV_LABEL_LONG_WRAP);
 +    auto *save=lv_button_create(_settings);lv_obj_set_pos(save,860,260);lv_obj_set_size(save,165,48);
 +    auto *text=lv_label_create(save);lv_label_set_text(text,"Use target");lv_obj_center(text);
 +    lv_obj_add_event_cb(save,[](lv_event_t *e){auto *self=static_cast<Ax900TestView *>(lv_event_get_user_data(e));
-+        unsigned long port=strtoul(lv_textarea_get_text(self->_fields[1]),nullptr,10);
-+        if(!port || port>65535){lv_textarea_set_text(self->_fields[1],"5201");return;}
++        const char *portText=lv_textarea_get_text(self->_fields[1]);char *end=nullptr;
++        unsigned long port=strtoul(portText,&end,10);
++        if(!port || port>65535 || !end || *end || strspn(portText,"0123456789")!=strlen(portText)){
++            lv_label_set_text(self->_settingsStatus,"Port must be a number from 1 to 65535.");return;
++        }
 +        snprintf(self->_config.host,sizeof(self->_config.host),"%s",lv_textarea_get_text(self->_fields[0]));
 +        self->_config.port=port;
 +        snprintf(self->_config.dns_ipv4,sizeof(self->_config.dns_ipv4),"%s",lv_textarea_get_text(self->_fields[2]));
@@ -619,6 +651,8 @@ new file mode 100644
 +    lv_group_focus_obj(_fields[0]);
 +}
 +void Ax900TestView::update(const ax900_link_status_t &s) {
++    unsigned mode=lv_dropdown_get_selected(_mode);
++    if(_lastMode!=mode){_startError=ESP_OK;_lastMode=mode;}
 +    bool active=s.connecting || s.associated;
 +    lv_label_set_text(_ssid,active && s.connected_ssid[0]?s.connected_ssid:"No network");
 +    if(active && s.connected_frequency) {
@@ -657,9 +691,11 @@ new file mode 100644
 +        if(running){lv_obj_add_state(_mode,LV_STATE_DISABLED);lv_obj_add_state(_configure,LV_STATE_DISABLED);}
 +        else{lv_obj_remove_state(_mode,LV_STATE_DISABLED);lv_obj_remove_state(_configure,LV_STATE_DISABLED);}
 +        const char *states[]={"Choose a target and run","Testing...","Test passed","Test failed","Cancelled","Connection changed"};
-+        lv_label_set_text(_headline,_startError?esp_err_to_name(_startError):!has_ip?"Connect to Wi-Fi first":states[t.state]);
++        auto help=!has_ip?ax900_connection_help(&s):ax900_test_help(&t,_startError);
++        lv_label_set_text(_headline,help.title[0]?help.title:states[t.state]);
 +        const char *stages[]={"ready","interface","DNS","socket","connect","transfer","response"};
-+        if(t.state==AX900_TEST_PASSED || t.state==AX900_TEST_FAILED)
++        if(help.action[0])lv_label_set_text(_summary,help.action);
++        else if(t.state==AX900_TEST_PASSED || t.state==AX900_TEST_FAILED)
 +            lv_label_set_text_fmt(_summary,"%s | %lu ms | %lu kbps | UDP %lu / %lu\nHTTP %d | errors %d / %d",
 +                stages[t.stage],(unsigned long)t.elapsed_ms,(unsigned long)t.kilobits_per_second,(unsigned long)t.received,
 +                (unsigned long)t.sent,t.http_status,t.error,t.socket_error);
@@ -670,7 +706,8 @@ new file mode 100644
 +            lv_label_set_text_fmt(_samples[1],"%lu kbps",(unsigned long)t.kilobits_per_second);
 +            lv_label_set_text_fmt(_samples[2],"%lu ms",(unsigned long)t.average_ms);
 +            lv_label_set_text_fmt(_samples[3],"%lu KB",(unsigned long)(t.internal_after/1024));
-+            lv_label_set_text_fmt(_samples[4],"%lu KB min",(unsigned long)(t.internal_minimum/1024));
++            if(t.kind==AX900_TEST_HTTP && t.http_status)lv_label_set_text_fmt(_samples[4],"HTTP %d",t.http_status);
++            else lv_label_set_text_fmt(_samples[4],"%lu KB min",(unsigned long)(t.internal_minimum/1024));
 +        }
 +        lv_bar_set_value(_progress,t.state==AX900_TEST_PASSED?AX900_PROBE_COUNT:0,LV_ANIM_OFF);return;
 +    }
@@ -685,16 +722,18 @@ new file mode 100644
 +    if(!has_ip)lv_label_set_text(_headline,"Connect to Wi-Fi first");
 +    else if(stale)lv_label_set_text(_headline,"Connection changed");
 +    else if(running)lv_label_set_text_fmt(_headline,"Testing %lu / %u",(unsigned long)p.sent,AX900_PROBE_COUNT);
-+    else if(p.error)lv_label_set_text(_headline,"Could not start test");
++    else if(p.error)lv_label_set_text(_headline,ax900_test_help(nullptr,p.error).title);
 +    else if(p.received)lv_label_set_text_fmt(_headline,"%lu ms  average",(unsigned long)p.average_ms);
 +    else lv_label_set_text(_headline,p.state==AX900_PROBE_FAILED?"No gateway reply":"Ready to test");
 +    lv_obj_set_style_text_color(_headline,lv_color_hex(color),0);
-+    if(has_ip && measured && p.sent)
++    if(has_ip && measured && p.sent && p.received)
 +        lv_label_set_text_fmt(_summary,"%lu / %lu replies   |   %lu%% loss   |   min %lu / max %lu ms",
 +            (unsigned long)p.received,(unsigned long)p.sent,(unsigned long)((p.sent-p.received)*100/p.sent),(unsigned long)p.min_ms,(unsigned long)p.max_ms);
 +    else if(stale)lv_label_set_text(_summary,"Run a new test for the current connection.");
-+    else if(p.error && has_ip)lv_label_set_text(_summary,esp_err_to_name(p.error));
++    else if(p.error && has_ip)lv_label_set_text(_summary,ax900_test_help(nullptr,p.error).action);
++    else if(p.state==AX900_PROBE_FAILED && has_ip)lv_label_set_text(_summary,"Gateway may block ping. Try TCP/HTTP to check connectivity.");
 +    else lv_label_set_text(_summary,"5 requests  /  latency and packet loss");
++    if(!has_ip){auto help=ax900_connection_help(&s);lv_label_set_text(_headline,help.title[0]?help.title:"Connect to Wi-Fi first");lv_label_set_text(_summary,help.action[0]?help.action:"Select a network and wait for an IP address.");}
 +    lv_bar_set_value(_progress,measured && has_ip?p.sent:0,LV_ANIM_OFF);
 +    for(unsigned i=0;i<AX900_PROBE_COUNT;i++) {
 +        int32_t rtt=measured && has_ip?p.rtt_ms[i]:-1;

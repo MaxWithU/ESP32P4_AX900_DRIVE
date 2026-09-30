@@ -233,6 +233,7 @@ esp_err_t ax900_test_start(const ax900_test_config_t *config){
         if(e==ESP_OK && dns.ip.type==ESP_IPADDR_TYPE_V4)t->dns=dns.ip.u_addr.ip4.addr;
         uint32_t literal;
         if((config->kind==AX900_TEST_DNS || inet_pton(AF_INET,config->host,&literal)!=1) && !t->dns){
+            taskENTER_CRITICAL(&test_lock);published.stage=AX900_TEST_STAGE_DNS;taskEXIT_CRITICAL(&test_lock);
             free(t);return start_failed(e==ESP_OK?ESP_ERR_NOT_FOUND:e);
         }
     }

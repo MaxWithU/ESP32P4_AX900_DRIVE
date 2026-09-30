@@ -10,6 +10,7 @@
 #include "mbedtls/platform_time.h"
 #include "mbedtls/esp_mbedtls_random.h"
 #include <assert.h>
+#include "ax900_issue.h"
 static mbedtls_time_t test_now;
 static mbedtls_time_t test_time(mbedtls_time_t *out){if(out)*out=test_now;return test_now;}
 
@@ -61,6 +62,7 @@ static unsigned char *load(const char *path,size_t *len) {
 }
 static void run(const unsigned char *cert,size_t cert_len,const char *cert_path,const char *key_path,
                 const char *name,bool trusted,bool expected_success) {
+    ax_issue_set(AX900_ISSUE_NONE);
     struct server s={0};
     mbedtls_ssl_init(&s.ssl);mbedtls_ssl_config_init(&s.conf);mbedtls_x509_crt_init(&s.cert);mbedtls_pk_init(&s.key);
     assert(mbedtls_x509_crt_parse_file(&s.cert,cert_path)==0);
@@ -106,7 +108,13 @@ static void run(const unsigned char *cert,size_t cert_len,const char *cert_path,
         plain=wpabuf_alloc_copy(payload,sizeof(payload));deliver_server(&s,tls_connection_encrypt(ctx,client,plain));wpabuf_free(plain);
         unsigned char received[32];assert(mbedtls_ssl_read(&s.ssl,received,sizeof(received))==sizeof(payload));
         assert(!memcmp(received,payload,sizeof(payload)));
-    } else assert(tls_connection_get_failed(ctx,client));
+    } else {
+        assert(tls_connection_get_failed(ctx,client));
+        ax900_issue_t issue=ax900_get_connection_issue();
+        if(strstr(cert_path,"expired") || strstr(cert_path,"future"))assert(issue==AX900_ISSUE_CERT_DATE);
+        else if(name && !strcmp(name,"wrong.test"))assert(issue==AX900_ISSUE_CERT_NAME);
+        else assert(issue==AX900_ISSUE_CERTIFICATE);
+    }
     tls_connection_deinit(ctx,client);tls_deinit(ctx);
     mbedtls_ssl_free(&s.ssl);mbedtls_ssl_config_free(&s.conf);mbedtls_x509_crt_free(&s.cert);mbedtls_pk_free(&s.key);
     wpabuf_free(s.input);wpabuf_free(s.output);
@@ -117,7 +125,13 @@ int main(int argc,char **argv) {
     struct tls_connection_params p={.ca_cert_blob=cert,.ca_cert_blob_len=len,.domain_match="radius.test"};
     void *ctx=tls_init(NULL);struct tls_connection *c=tls_connection_init(ctx);assert(c);
     mbedtls_time_t saved=test_now;test_now=0;
-    assert(tls_connection_set_params(ctx,c,&p)==-1);tls_connection_deinit(ctx,c);test_now=saved;
+    assert(tls_connection_set_params(ctx,c,&p)==-1);
+#if defined(MBEDTLS_HAVE_TIME_DATE)
+    assert(ax900_get_connection_issue()==AX900_ISSUE_CLOCK);
+#else
+    assert(ax900_get_connection_issue()==AX900_ISSUE_TLS_CONFIG);
+#endif
+    tls_connection_deinit(ctx,c);test_now=saved;
 #if defined(MBEDTLS_HAVE_TIME_DATE)
     c=tls_connection_init(ctx);assert(tls_connection_set_params(ctx,c,&p)==0);
     test_now=0;assert(tls_connection_handshake(ctx,c,NULL,NULL)==NULL && tls_connection_get_failed(ctx,c));

@@ -61,4 +61,6 @@ Ping 使用仓库内固定到 ESP-IDF 5.5.2 的实现，在启用 CONFIG_FREERTO
 
 Connection test 还提供 DNS、TCP、HTTP、上传、下载和 UDP 往返测试；在 Target 中配置目标。上传/下载/UDP 需局域网电脑运行 `tools/benchmark_peer.py`。结果显示耗时、速率、回复数、HTTP 状态和失败阶段；只通过 AX900 接口测试。目标仅保存在 RAM。
 
+状态栏出现 “tap for help” 时可点击或用实体键盘选中后按 Enter，查看原因和下一步。提示区分认证未通过、时钟未设置、CA 无效、服务器证书日期/名称/信任失败、DHCP 超时、USB 恢复及配置保存失败。认证失败不单独认定为密码错误；具体 TLS 原因不会被后续笼统失败覆盖。Connection test 同样给出 DNS、连接拒绝、HTTP 错误和传输超时建议，HTTP 状态保留在结果格中。提示不包含账号、密码或证书内容。
+
 企业连接窗口可取消“不校验证书”，填写服务器 DNS 名及 `/sd/` 下的 PEM CA 路径。保存网络页只显示元数据，不显示密码。当前设备仍使用普通 NVS；受保护存储的配置步骤和限制见 `docs/driver-development.md`。

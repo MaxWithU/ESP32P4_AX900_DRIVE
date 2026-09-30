@@ -2,6 +2,7 @@
 #include "ax900_internal.h"
 #include "aic8800_protocol.h"
 #include "ax900_rx.h"
+#include "ax900_issue.h"
 #include "esp_netif.h"
 #include "ax900_netif_dns.h"
 #include "esp_netif_defaults.h"
@@ -93,6 +94,7 @@ static void ip_event(void *arg,esp_event_base_t base,int32_t id,void *data) {
         if(accepted){net.addresses=addresses;net.has_ip=true;}
         taskEXIT_CRITICAL(&io_lock);
         if(!accepted)return;
+        ax_issue_set(AX900_ISSUE_NONE);
         char ip[16];snprintf(ip,sizeof(ip),IPSTR,IP2STR(&event->ip_info.ip));ax_ip_state(ip);
         char status[96];snprintf(status,sizeof(status),"Connected: %s",ip);ax_status(status);
     }
@@ -275,7 +277,7 @@ static esp_err_t connect_request(ax900_device_t *d,ax_connect_request_t *request
     if(net.d!=d){ax_free_connect_request(request);return ESP_ERR_INVALID_STATE;}
     esp_err_t quiet=ax_data_quiesce(d);
     if(quiet!=ESP_OK){ax_free_connect_request(request);return quiet;}
-    clear_link();net.credentials=request;
+    clear_link();ax_issue_set(AX900_ISSUE_NONE);net.credentials=request;
     const ax900_ap_t *ap=&request->ap;const char *password=request->password;
     ax_link_state(true,false,false,ap->ssid,0);net.ap=*ap;net.failed=false;net.reason=0;
     // Recycle after an established session, preserving the initial scan cache before first association.
@@ -287,7 +289,8 @@ static esp_err_t connect_request(ax900_device_t *d,ax_connect_request_t *request
     }
     memcpy(d->bssid,ap->bssid,6);
     memset(net.keys,0xff,sizeof(net.keys));d->station=0xff;d->link_event=false;d->disconnected=false;d->associated=false;
-    TRY(confirm_target(d,ap));
+    esp_err_t confirmation=confirm_target(d,ap);
+    if(confirmation!=ESP_OK){ax_issue_if_clear(AX900_ISSUE_ASSOCIATION);return confirmation;}
     struct aic_wire_sm_connect_req req={0};
     req.ssid.length=ap->ssid_len;memcpy(req.ssid.array,ap->raw_ssid,ap->ssid_len);
     memcpy(&req.bssid,ap->bssid,6);req.channel.frequency=ap->frequency;
@@ -326,12 +329,12 @@ static esp_err_t connect_request(ax900_device_t *d,ax_connect_request_t *request
     ax_link_state(true,false,false,ap->ssid,0);ax_status("Associating with access point");
     uint8_t reply[4];size_t got=0;
     esp_err_t e=ax_command(d,AIC_SM_CONNECT_REQ,AIC_SM_CONNECT_CFM,&req,sizeof(req),reply,sizeof(reply),&got);
-    if(e!=ESP_OK || got<1 || reply[0]){clear_link();return e==ESP_OK?ESP_FAIL:e;}
+    if(e!=ESP_OK || got<1 || reply[0]){ax_issue_if_clear(AX900_ISSUE_ASSOCIATION);clear_link();return e==ESP_OK?ESP_FAIL:e;}
     net.deadline=esp_timer_get_time()+(request->enterprise?90000000:30000000);return ESP_OK;
 }
 esp_err_t ax_net_connect(ax900_device_t *d,ax_connect_request_t *request) {
     esp_err_t result=connect_request(d,request);
-    if(result!=ESP_OK && net.d==d)clear_link();
+    if(result!=ESP_OK && net.d==d){ax_issue_if_clear(result==ESP_ERR_NO_MEM?AX900_ISSUE_MEMORY:AX900_ISSUE_CONNECTION);clear_link();}
     return result;
 }
 static void enqueue_rx(void *ctx,const uint8_t *data,size_t length,bool encrypted) {
@@ -363,13 +366,14 @@ void ax_net_poll(ax900_device_t *d) {
         if(!net.failed)net.reason=d->disconnect_reason;
         // A rejection during authentication can indicate stale credentials.
         bool auth_failure=session && (!net.authenticated || (net.reason>=14 && net.reason<=24));
+        if(auth_failure && !diagnostic)ax_issue_if_clear(AX900_ISSUE_AUTHENTICATION);
         clear_link();ax_status("Access point disconnected");
         if(session && !diagnostic)ax_reconnect_lost(auth_failure);
         return;
     }
     if(d->link_event) {
         d->link_event=false;
-        if(d->link_status || !d->associated){net.reason=d->link_status;clear_link();ax_status("Association failed (IEEE status in reason)");ax_reconnect_lost(false);return;}
+        if(d->link_status || !d->associated){net.reason=d->link_status;ax_issue_if_clear(AX900_ISSUE_ASSOCIATION);clear_link();ax_status("Association failed (IEEE status in reason)");ax_reconnect_lost(false);return;}
         else {
             net.recycled=true; // Recycle only after a real association has created peer state.
             ax_link_state(true,true,false,net.ap.ssid,0);
@@ -407,7 +411,9 @@ void ax_net_poll(ax900_device_t *d) {
     if(net.eapol && eapol_sm_failed(net.eapol)){net.failed=true;net.reason=23;}
     if(net.failed || (net.deadline && esp_timer_get_time()>net.deadline)) {
         bool diagnostic=net.credentials && net.credentials->association_test;
-        bool timeout=!net.failed;ax_net_disconnect(d,net.reason?net.reason:15);net.failed=false;
+        bool timeout=!net.failed;
+        if(!diagnostic)ax_issue_if_clear(timeout?AX900_ISSUE_AUTH_TIMEOUT:AX900_ISSUE_AUTHENTICATION);
+        ax_net_disconnect(d,net.reason?net.reason:15);net.failed=false;
         ax_status(diagnostic?"Association test ended":timeout?"Connection timed out":"WPA2 authentication failed");
         if(!diagnostic)ax_reconnect_lost(true);
         return;
@@ -430,7 +436,7 @@ void ax_net_poll(ax900_device_t *d) {
             (void)esp_netif_dhcpc_stop(net.netif);(void)esp_netif_dhcpc_start(net.netif);
             ax_status("DHCP timeout; retrying address request");
         } else {
-            ax_net_disconnect(d,3);ax_status("DHCP retry limit reached");ax_reconnect_lost(false);return;
+            ax_issue_set(AX900_ISSUE_DHCP);ax_net_disconnect(d,3);ax_status("DHCP retry limit reached");ax_reconnect_lost(false);return;
         }
     }
     if(net.authenticated && net.has_ip && net.credentials && !net.credentials->skip_save && !net.save_attempted) {

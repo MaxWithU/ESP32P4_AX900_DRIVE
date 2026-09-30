@@ -74,7 +74,9 @@
     "radio_channels": "ASan/UBSan: conservative CN/US/EU/JP channel and DFS filtering passed",
     "protected_profiles": "ASan/UBSan: production protected branch rejects plaintext/preopened storage and missing/invalid keys; failed secure initialization has no fallback",
     "network_test_api": "ASan/UBSan: interface/source binding, argument validation, busy/cancel/stale states, cleanup, malformed/failed HTTP response and timeout passed",
-    "wpa2": "ASan/UBSan: real Hostap + mbedTLS PBKDF2 vector and four-way handshake; missing RSNXE rejected, matching RSNXE installs PTK/GTK, invalid MIC rejected"
+    "wpa2": "ASan/UBSan: real Hostap + mbedTLS PBKDF2 vector and four-way handshake; missing RSNXE rejected, matching RSNXE installs PTK/GTK, invalid MIC rejected",
+    "error_help": "Specific TLS clock/date/name/trust errors survive generic authentication failure; DNS, refused connection, HTTP, invalid target, stale connection, memory and saved-settings advice covered. Real mbedTLS handshake failures verify the emitted categories.",
+    "release_tools": "12 synthetic Flash tests passed; production update/restore code and esptool adapter flags exercised without device access"
   },
   "hardware_association": {
     "frequency_mhz": 5260,
@@ -420,5 +422,28 @@
     "official_patch": "Applies to pinned official baseline; 13 source/CMake files match the integration checkout; checked-in sdkconfig and defaults both enable per-interface DNS and certificate dates",
     "hardware": "Not flashed or tested on hardware in this revision. Earlier hardware measurements and installed image hashes in this document refer to the pre-review firmware.",
     "logs": "All raw build/test logs and generated certificates remain local and excluded from Git; only this sanitized conclusion is published."
+  },
+  "release_candidate": {
+    "date": "2026-09-30",
+    "version": "0.1.0-rc.1",
+    "scope": "Application-only update/restore release tooling and actionable connection/test error help",
+    "host_regression": "21 local suites passed; C/C++ host regressions use ASan/UBSan. Release tools include 12 synthetic Flash tests; no physical serial operations.",
+    "update_restore_tests": [
+      "wrong chip/revision/capacity/security rejected before write",
+      "corrupt image/tool or mismatched partition layout rejected",
+      "backup verification failure prevents write",
+      "simulated interrupted write leaves a verified restorable backup",
+      "failed post-write verification is not success",
+      "restore rejects other devices and corrupt backups",
+      "update and restore preserve every byte outside the application partition",
+      "same image skips write",
+      "release paths cannot escape the bundle",
+      "esptool adapter never enables force or erase-all"
+    ],
+    "error_help_tests": "Specific TLS clock/date/name/trust errors survive generic authentication failure; DNS, refused connection, HTTP, invalid target, stale connection, memory and saved-settings advice covered. Real mbedTLS handshake failures verify the emitted categories.",
+    "builds": "Standalone and official UserDemo passed on ESP-IDF 5.5.2; official application version is 0.1.0-rc.1",
+    "patch": "Applies to pinned official baseline; 13 source/CMake files match current integration",
+    "hardware": "Candidate image has not been flashed; real update/restore and on-screen verification remain pending. Prior hardware evidence belongs to earlier firmware.",
+    "privacy": "Only allowlisted build output, tools, source/license metadata and sanitized validation conclusions are packaged. Device backups, raw logs, credentials, certificates and screenshots remain local."
   }
 }

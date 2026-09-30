@@ -23,6 +23,10 @@
 
 ## 获取与构建
 
+使用已支持的 Tab5 V3 / ESP32-P4 v1.3 / 16 MB 官方分区布局，可下载 [候选版安装包](https://github.com/MaxWithU/ESP32P4_AX900_DRIVE/releases/tag/v0.1.0-rc.1)，按 [快速安装说明](release/QUICKSTART.md) 更新，无需安装 ESP-IDF。包内工具检查芯片和分区、备份并校验旧应用后，只更新应用区，保留当前 Wi-Fi 配置；支持恢复同一设备的应用备份。
+
+候选版的更新/恢复流程已通过模拟 Flash 回归，尚未实机验收；不是稳定版。其他硬件或分区布局仍走以下开发者构建流程。发布维护步骤见 [发布说明](docs/releases.md)。
+
 先安装并激活 [ESP-IDF 5.5.2](https://docs.espressif.com/projects/esp-idf/en/v5.5.2/esp32p4/get-started/index.html)，然后：
 
 ```sh
